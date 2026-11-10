@@ -411,7 +411,7 @@ export function apply(ctx, config) {
     name: 'deskflow_status',
     description: '查询键鼠共享（Deskflow）状态：局域网发现是否运行、发现的设备列表、当前角色（coreMode）、Deskflow 进程是否在跑。',
     parameters: { type: 'object', properties: {} },
-    output: { schema: { type: 'object' } }, render: renderJson,
+    output: { schema: { type: 'object' }, render: renderJson },
     async execute() {
       return {
         discovering: !!socket,
@@ -430,7 +430,7 @@ export function apply(ctx, config) {
     name: 'deskflow_scan_peers',
     description: '立即广播一次局域网发现并等待约 2.5 秒，返回当前发现的所有键鼠共享设备（需对端也安装了本插件或 Deskflow fork）。',
     parameters: { type: 'object', properties: {} },
-    output: { schema: { type: 'object' } }, render: renderJson,
+    output: { schema: { type: 'object' }, render: renderJson },
     async execute() {
       announce(false);
       await new Promise(r => setTimeout(r, 2500));
@@ -450,7 +450,7 @@ export function apply(ctx, config) {
       },
       required: ['role'],
     },
-    output: { schema: { type: 'object' } }, render: renderJson,
+    output: { schema: { type: 'object' }, render: renderJson },
     async execute(args) { return await connect(args, pluginConfig); },
   });
 
@@ -458,7 +458,7 @@ export function apply(ctx, config) {
     name: 'deskflow_disconnect',
     description: '断开键鼠共享：停止插件启动的 Deskflow 进程并把角色置回未连接。',
     parameters: { type: 'object', properties: {} },
-    output: { schema: { type: 'object' } }, render: renderJson,
+    output: { schema: { type: 'object' }, render: renderJson },
     async execute() {
       const killed = killDeskflowChild();
       try { patchConf({ core: { coreMode: 0 } }); } catch { /* ignore */ }
