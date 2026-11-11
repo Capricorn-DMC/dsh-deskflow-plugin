@@ -501,7 +501,10 @@ async function launchHeadless(config, role, peerName) {
         // 心跳检测：服务端解析 server config 的 options 段时注入 kOptionHeartbeat
         // （Config.cpp readSectionOptions 从主 conf 读这两个键），
         // 客户端失联约 3 个心跳周期即被剔除，避免 core 异常退出后服务端残留僵尸会话"假在线"
-        enableHeartbeat: 'true',
+        // ⚠️ 默认关闭：实测 5s 心跳会导致 core 写 socket 失败，
+        // 表现为连接被 error writing 周期性掐断（随后退避重连）、切屏后光标卡在 x=0 被弹回。
+        // 需要僵尸会话清理时再手动开启并观察是否复现。
+        enableHeartbeat: 'false',
         heartbeat: '5000',
       },
     });
