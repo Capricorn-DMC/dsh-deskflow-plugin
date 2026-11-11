@@ -193,7 +193,7 @@
           h('div', { style: { flex: 1 } },
             h('div', { style: { fontSize: 12, fontWeight: 600 } }, `本机角色：${CORE_MODE_NAMES[status.coreMode] || '未知'}`),
             h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
-              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '后台核心未运行')),
+              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '待连接（选择角色后自动启动）')),
           connected && !busy
             ? h('button', { onClick: doDisconnect, disabled: busy, style: s.btnDanger }, '断开')
             : null,
