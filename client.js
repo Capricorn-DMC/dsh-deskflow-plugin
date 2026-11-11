@@ -19,17 +19,17 @@
 
     // ─── 主题 token（DSW alias，深浅色自适应）─────────────────────────────
     const T = {
-      bgLayer1: 'var(--dsw-alias-bg-layer-1)',
-      bgLayer2: 'var(--dsw-alias-bg-layer-2)',
-      borderL1: 'var(--dsw-alias-border-l1)',
-      borderL2: 'var(--dsw-alias-border-l2)',
-      text: 'var(--dsw-alias-label-primary)',
-      text2: 'var(--dsw-alias-label-secondary)',
-      text3: 'var(--dsw-alias-label-tertiary)',
-      accent: 'var(--dsw-alias-brand-primary)',
-      accentSoft: 'var(--dsw-alias-brand-primary-soft)',
-      success: 'var(--dsw-alias-state-success-primary)',
-      error: 'var(--dsw-alias-state-error-primary)',
+      bgLayer1: '#141b24',
+      bgLayer2: '#1c2530',
+      borderL1: '#2a3644',
+      borderL2: '#33414f',
+      text: '#e9f1f8',
+      text2: '#a8bac8',
+      text3: '#74879a',
+      accent: '#2f81f7',
+      accentSoft: 'rgba(47, 129, 247, 0.16)',
+      success: '#3fb950',
+      error: '#f85149',
     };
     const FONT = 'var(--dsw-font-family, system-ui, sans-serif)';
     // 毛玻璃主题下 bg-layer-* 常带透明度，直接做面板/卡片背景会让文字发虚看不清。
