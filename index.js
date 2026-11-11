@@ -336,24 +336,35 @@ function addServerScreen(peerName) {
     writeConfFile(file, hadBom, lines);
   }
 
-  // 2) [computer_N] 分组：core 已知屏幕清单（服务端自身 + 对端）
-  const existing = new Map(); // N -> name
-  let section = '';
-  for (const line of lines) {
-    const secM = line.match(/^\s*\[([^\]]+)\]\s*$/);
-    if (secM) { section = secM[1].trim(); continue; }
-    const cm = section.match(/^computer_(\d+)$/);
-    if (cm) {
-      const nmM = line.match(/^\s*name\s*=(.*)$/);
-      if (nmM) existing.set(parseInt(cm[1], 10), nmM[1].trim());
+  // 2) [computer_<名字>] 分组：core 已知屏幕清单（服务端自身 + 对端）。
+  //    fork 的 Settings::knownComputers() 把【所有】computer_* 分组的 name= 值当计算机清单
+  //    （Settings.cpp knownComputers），GUI 格式是每台机器一个 [computer_<名字>] 组；
+  //    若写成编号组 [computer_1]/[computer_2] 会与 [computer_<名字>] 设置组重复声明同名机器，
+  //    core 解析 server.conf 时抛 "duplicate computer name" 直接 FATAL（exit 4）。
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const wanted = [selfName, peerName].filter(Boolean);
+  // 先剔除历史遗留的编号组（整段删除）
+  const legacy = lines
+    .map((l, i) => ({ l, i }))
+    .filter(({ l }) => /^\s*\[computer_\d+\]\s*$/.test(l))
+    .map(({ i }) => i);
+  if (legacy.length > 0) {
+    let removed = 0;
+    for (const start of legacy) {
+      const s = start - removed;
+      let e = s + 1;
+      while (e < lines.length && !/^\s*\[/.test(lines[e])) e++;
+      lines.splice(s, e - s);
+      removed += e - s;
     }
   }
-  const wanted = [selfName, peerName].filter(Boolean);
-  const missing = wanted.filter((n) => ![...existing.values()].includes(n));
-  if (missing.length > 0) {
-    let next = existing.size > 0 ? Math.max(...existing.keys()) + 1 : 1;
-    const extra = [];
-    for (const name of missing) extra.push(`[computer_${next++}]`, `name=${name}`, '');
+  const hasGroup = (name) =>
+    lines.some((l) => new RegExp(`^\\s*\\[computer_${esc(name)}\\]\\s*$`).test(l));
+  const extra = [];
+  for (const name of wanted) {
+    if (!hasGroup(name)) extra.push(`[computer_${name}]`, `name=${name}`, 'aliases=@Invalid()', '');
+  }
+  if (legacy.length > 0 || extra.length > 0) {
     // 追加到文件末尾（保留最后一行换行）
     const trimmed = [...lines];
     while (trimmed.length && trimmed[trimmed.length - 1] === '') trimmed.pop();
