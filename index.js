@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.5.0';
+const PLUGIN_VERSION = '1.6.0';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -87,9 +87,6 @@ let discoveryError = null;   // 发现 socket 绑定失败原因（如端口被�
 const PEERS_CACHE = path.join(os.homedir(), '.dsh', 'deskflow-peers.json');
 let staticPeers = [];       // cordis 配置 staticPeers: ['192.168.100.101', ...]
 let knownIps = new Set();   // 见过的对端 IP（持久化，断电重启用单播补路）
-
-// 后台核心的 PID 落盘：cordis 热重载会丢掉模块内变量，退出钩子只能靠它找回子进程
-const CORE_PID_FILE = path.join(os.homedir(), '.dsh', 'deskflow-core.pid');
 
 function loadPeersCache() {
   try {
@@ -422,41 +419,70 @@ function allowFirewall() {
 
 // ─── 进程管理 ────────────────────────────────────────────────────────────────
 function killDeskflowChild() {
+  let killed = false;
   if (deskflowChild) {
     try { deskflowChild.kill(); } catch { /* ignore */ }
     deskflowChild = null;
-    return true;
+    killed = true;
   }
-  return false;
+  // 接管来的核心没有 child 句柄，只能按 pid 结束
+  const pid = managedPid || readCoreState()?.pid || null;
+  if (pid && pidAlive(pid)) {
+    if (killPidSync(pid)) killed = true;
+  }
+  managedPid = null;
+  clearCoreState();
+  return killed;
 }
 
-// ─── 生命周期监管：DSH 退出时收掉自己拉起的后台核心 ──────────────────────────
-// 历史行为：core 以 detached+unref 启动，注释写着"独立于 DSH 生命周期"，于是关掉 DSH 后
-// 24800 仍在监听、客户端仍保持连接。下次打开 DSH 再连接时，服务端就会发现同名客户端
-// 已经在连（`a client with name "x" is already connected`）并踢掉旧 socket——互踢、
-// 切屏抖动都由此而来。默认改为随 DSH 退出收敛；要常驻的显式配置 keepRunningOnExit: true。
+// ─── 进程接管与生命周期：不重复拉起，也不重复连接 ────────────────────────────
+// core 以 detached+unref 启动，DSH 关掉后它仍在跑、连接也还在。这本身不算缺陷——
+// 界面关掉后键鼠共享继续可用，是不少人想要的行为。真正的坑在"重新连接"：再 spawn 一个
+// 同名客户端，服务端就会报 `a client with name "x" is already connected` 并踢掉旧 socket，
+// 旧核心随即重连，两个进程互踢，表现就是切屏抖动、偶发断线。
+//
+// 策略因此改为**接管而不是重启**：启动前先读盘上的状态记录，若已有同角色、同对端、同布局、
+// 同模式的核心在跑，就沿用它（不再 spawn 第二个）；签名不一致才清理后重启。
+// 退出时默认**不动**核心（keepRunningOnExit 默认 true），要"关界面即停"的设 false。
 
-function writeCorePid(pid) {
-  try {
-    fs.mkdirSync(path.dirname(CORE_PID_FILE), { recursive: true });
-    fs.writeFileSync(CORE_PID_FILE, String(pid), 'utf8');
-  } catch { /* ignore */ }
-}
-
-function readCorePid() {
-  try {
-    const n = Number(fs.readFileSync(CORE_PID_FILE, 'utf8').trim());
-    return Number.isInteger(n) && n > 0 ? n : null;
-  } catch { return null; }
-}
-
-function clearCorePidFile() {
-  try { fs.unlinkSync(CORE_PID_FILE); } catch { /* ignore */ }
-}
+const CORE_STATE_FILE = path.join(os.homedir(), '.dsh', 'deskflow-core.state.json');
+let managedPid = null;   // 当前受管的 core：自己 spawn 的，或接管来的
 
 function pidAlive(pid) {
   if (!pid) return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function readCoreState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(CORE_STATE_FILE, 'utf8'));
+    if (!s || typeof s !== 'object') return null;
+    const pid = Number(s.pid);
+    return Number.isInteger(pid) && pid > 0 ? { ...s, pid } : null;
+  } catch { return null; }
+}
+
+function writeCoreState(state) {
+  try {
+    fs.mkdirSync(path.dirname(CORE_STATE_FILE), { recursive: true });
+    fs.writeFileSync(CORE_STATE_FILE, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2), 'utf8');
+  } catch { /* ignore */ }
+}
+
+function clearCoreState(expectedPid) {
+  // 带 pid 时只清自己那条，避免抹掉后来者写的记录（热重载/连续连接会踩到）
+  if (expectedPid != null) {
+    const cur = readCoreState();
+    if (cur && cur.pid !== expectedPid) return;
+  }
+  try { fs.unlinkSync(CORE_STATE_FILE); } catch { /* ignore */ }
+}
+
+// pid 还活着、并且确实是 deskflow-core 才认（防 pid 复用撞上别的进程）
+function stateCoreAlive(state) {
+  if (!state?.pid || !pidAlive(state.pid)) return false;
+  const pids = listImagePids('deskflow-core.exe');
+  return Array.isArray(pids) ? pids.includes(state.pid) : true;
 }
 
 // 同步结束进程树：'exit' 事件里不能 await，只能 execSync
@@ -471,12 +497,43 @@ function killPidSync(pid) {
   try { process.kill(pid, 'SIGTERM'); return true; } catch { return false; }
 }
 
+// 接管判定：角色/对端/布局/模式全一致才沿用。任何一项不同都不能接管——
+// 否则会出现"点了连接，实际连的还是上次那台/那个方向"的静默错误。
+function canAdoptCore(state, want) {
+  if (!state || !stateCoreAlive(state)) return { ok: false, reason: '没有在跑的核心' };
+  if (want.mode && state.mode && state.mode !== want.mode) return { ok: false, reason: `已有核心运行模式为 ${state.mode}` };
+  if (state.role !== want.role) return { ok: false, reason: `已有核心是 ${state.role} 角色` };
+  if ((state.layout || '') !== (want.layout || '')) return { ok: false, reason: `已有核心布局为 ${state.layout || '-'}` };
+  if (String(state.peer || '') !== String(want.peer || '')) return { ok: false, reason: `已有核心对端为 ${state.peer || '-'}` };
+  return { ok: true };
+}
+
+function adoptCore(state, want) {
+  managedPid = state.pid;
+  writeCoreState({ ...state, ...want, adoptedCount: (Number(state.adoptedCount) || 0) + 1 });
+  return { pid: state.pid, startedAt: state.startedAt || null, role: want.role, peer: want.peer };
+}
+
+// 面板/工具统一读这个：自己 spawn 的、接管的、以及"上次留下但还活着的"都算在跑
+function coreRuntime() {
+  const state = readCoreState();
+  const alive = stateCoreAlive(state);
+  const pid = deskflowChild?.pid || (alive ? state.pid : null);
+  return {
+    running: !!pid,
+    pid: pid || null,
+    adopted: !deskflowChild && !!alive && pid === state?.pid,
+    state: alive ? state : null,
+  };
+}
+
 function stopCoreOnExit(config, reason) {
-  if (config?.keepRunningOnExit === true) return { skipped: 'keepRunningOnExit' };
-  const pid = deskflowChild?.pid || readCorePid();
-  if (!pid || !pidAlive(pid)) { clearCorePidFile(); return { pid: null }; }
+  // 默认保留：关掉界面后键鼠共享继续可用，下次打开 DSH 直接接管同一个核心
+  if (config?.keepRunningOnExit !== false) return { skipped: 'keepRunningOnExit' };
+  const pid = deskflowChild?.pid || managedPid || readCoreState()?.pid || null;
+  if (!pid || !pidAlive(pid)) { clearCoreState(); return { pid: null }; }
   const ok = killPidSync(pid);
-  if (ok) clearCorePidFile();
+  if (ok) clearCoreState();
   return { pid, killed: ok, reason };
 }
 
@@ -561,11 +618,11 @@ function instanceWarnings(check) {
   return [`残留 ${check.remaining} 个旧的 ${check.image} 实例未能结束${hint}，会导致同名客户端互踢、切屏抖动，请在任务管理器手动结束`];
 }
 
-async function launchProcess(config, exe, args, label, { killImage = null } = {}) {
+async function launchProcess(config, exe, args, label, { killImage = null, role = null, peer = null, mode = 'headless' } = {}) {
   if (!fs.existsSync(exe)) {
     return { ok: false, message: `未找到后端：${exe}（插件自带 backend/ 目录缺失，可在插件配置 backendDir 中指定）` };
   }
-  if (deskflowChild) {
+  if (deskflowChild || managedPid) {
     killDeskflowChild();
     await new Promise(r => setTimeout(r, 800));
   }
@@ -575,6 +632,16 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
   if (killImage && process.platform === 'win32') {
     instanceCheck = cleanupInstances(killImage);
     if (instanceCheck.before > 0) await new Promise(r => setTimeout(r, 500));
+  }
+  // 清不掉就不能再起第二个：两个同名客户端会互踢，比"连不上"更难排查
+  if (instanceCheck && instanceCheck.remaining > 0) {
+    return {
+      ok: false,
+      instanceCheck,
+      message: `有 ${instanceCheck.remaining} 个旧的 ${instanceCheck.image} 结束不掉（PID ${(instanceCheck.remainingPids || []).join(', ')}）`
+        + `${isElevated() === false ? '，多半是它以管理员权限启动、而当前 DSH 没有' : ''}。`
+        + '请以管理员身份运行 DSH，或在任务管理器结束该进程后重试——直接再起一个会变成两个同名客户端互踢。',
+    };
   }
   try {
     // detached：后台核心独立于 DSH 生命周期，DSH 重启不影响键鼠共享；
@@ -587,10 +654,16 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
     const stdio = logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore';
     deskflowChild = spawn(exe, args, { detached: true, stdio });
     const childPid = deskflowChild.pid;
-    writeCorePid(childPid);
+    managedPid = childPid;
+    // 落盘签名：热重载后模块变量会丢，下次连接要靠它判断"能不能接管"
+    writeCoreState({
+      pid: childPid, role, peer,
+      layout: layoutDir(config), mode, exe,
+      startedAt: new Date().toISOString(),
+    });
     deskflowChild.on('exit', () => {
-      // 只清自己那条记录，避免误删后来者写的 pid
-      if (readCorePid() === childPid) clearCorePidFile();
+      if (managedPid === childPid) managedPid = null;
+      clearCoreState(childPid);   // 只清自己那条，避免误删后来者的记录
       deskflowChild = null;
       if (logFd >= 0) { try { fs.closeSync(logFd); } catch { /* ignore */ } logFd = -1; }
     });
@@ -598,6 +671,7 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
     return { ok: true, pid: deskflowChild.pid, logPath, instanceCheck, message: `${label}已启动（PID ${deskflowChild.pid}，后台运行）` };
   } catch (e) {
     deskflowChild = null;
+    managedPid = null;
     return { ok: false, message: `启动失败：${e?.message || e}` };
   }
 }
@@ -645,14 +719,15 @@ async function launchHeadless(config, role, peerName) {
         heartbeat: String(Number(config?.heartbeatInterval) > 0 ? Number(config.heartbeatInterval) : 30000),
       },
     });
-    return await launchProcess(config, exe, ['server', ...args], '键鼠共享服务端核心', { killImage: 'deskflow-core.exe' });
+    return await launchProcess(config, exe, ['server', ...args], '键鼠共享服务端核心', { killImage: 'deskflow-core.exe', role, peer: peerName });
   }
-  return await launchProcess(config, exe, ['client', ...args], '键鼠共享客户端核心', { killImage: 'deskflow-core.exe' });
+  return await launchProcess(config, exe, ['client', ...args], '键鼠共享客户端核心', { killImage: 'deskflow-core.exe', role, peer: peerName });
 }
 
 // gui：拉起 Deskflow GUI 窗口（由 GUI 自行管理 core）
 async function launchGui(config, role) {
-  return await launchProcess(config, guiExePath(config), [], 'Deskflow 窗口', { killImage: 'deskflow.exe' });
+  // 标 gui：否则状态记录会被写成 headless，之后的 headless 连接会误把 GUI 进程当成后台核心接管
+  return await launchProcess(config, guiExePath(config), [], 'Deskflow 窗口', { killImage: 'deskflow.exe', role, mode: 'gui' });
 }
 
 // ─── 连接动作：写 conf + 拉起后端 ────────────────────────────────────────────
@@ -692,9 +767,28 @@ async function connect(args, config) {
   try { file = patchConf(updates); } catch (e) {
     return { ok: false, message: `写入配置失败：${e?.message || e}` };
   }
-  const launched = launchMode(config) === 'gui'
-    ? await launchGui(config, role)
-    : await launchHeadless(config, role, peerName || ip);
+  const launched = await (async () => {
+    // 先看有没有可接管的核心：DSH 关掉后 core 可能还在跑且连接正常，
+    // 直接沿用比再 spawn 一个安全得多（同机两个同名客户端会在服务端互踢）
+    const want = {
+      role,
+      peer: role === 'client' ? ip : (peerName || null),
+      layout: layoutDir(config),
+      mode: launchMode(config),
+    };
+    if (want.mode === 'headless') {
+      const state = readCoreState();
+      const verdict = canAdoptCore(state, want);
+      if (verdict.ok) {
+        const a = adoptCore(state, want);
+        return { ok: true, adopted: true, pid: a.pid, startedAt: a.startedAt, instanceCheck: null, message: `已接管仍在运行的后台核心（PID ${a.pid}，配置一致，未重启）` };
+      }
+      if (state && String(verdict.reason || '').startsWith('已有核心')) {
+        console.log(`[deskflow] 现存核心与本次连接不一致，将重启：${verdict.reason}`);
+      }
+    }
+    return launchMode(config) === 'gui' ? await launchGui(config, role) : await launchHeadless(config, role, peerName || ip);
+  })();
 
   // 启动后随结果回传的自检警告，按"最容易踩坑"的顺序排列
   const warnings = [];
@@ -749,13 +843,22 @@ export function apply(ctx, config) {
   }
   // 启动后后台检测一次防火墙状态（status 读缓存，不阻塞 apply）
   setTimeout(() => { try { if (process.platform === 'win32') checkFirewall(); } catch { /* ignore */ } }, 1500);
-  // host 进程退出时广播 leaving，对端立即摘除本机
-  try { process.once('exit', () => { try { announce(true); } catch { /* ignore */ } }); } catch { /* ignore */ }
+  // host 进程退出时广播 leaving，对端立即摘除本机。
+  // 例外：核心还在跑（keepRunningOnExit 默认如此）时不广播——连接仍然活着，
+  // 广播 leaving 会让对端面板显示"离线"，与事实不符
+  try {
+    process.once('exit', () => {
+      try {
+        if (pluginConfig?.keepRunningOnExit !== false && coreRuntime().running) return;
+        announce(true);
+      } catch { /* ignore */ }
+    });
+  } catch { /* ignore */ }
 
-  // 退出监管：DSH 关闭（或插件被重载）时收掉本插件拉起的后台核心，
-  // 默认开启；想让 core 常驻（关掉界面仍保持键鼠共享）配置 keepRunningOnExit: true
-  const staleCore = readCorePid();
-  if (staleCore && !pidAlive(staleCore)) clearCorePidFile();
+  // 生命周期：默认保留核心（关掉界面后键鼠共享继续可用，重新连接时直接接管）；
+  // 想把"关界面"等同于"停服务"的，配置 keepRunningOnExit: false
+  const staleCore = readCoreState();
+  if (staleCore && !pidAlive(staleCore.pid)) clearCoreState();
   installExitHook(() => pluginConfig);
   try {
     if (typeof ctx?.on === 'function') {
@@ -792,6 +895,7 @@ export function apply(ctx, config) {
         try {
           switch (method) {
             case 'status': {
+              const rt = coreRuntime();   // 一次算完，避免重复跑 tasklist
               return reply({
                 ok: true,
                 value: {
@@ -803,16 +907,17 @@ export function apply(ctx, config) {
                   discoveryError,
                   peerCount: peerList().length,
                   coreMode: readCoreMode(),
-                  deskflowRunning: !!deskflowChild,
-                  deskflowPid: deskflowChild?.pid || null,
+                  deskflowRunning: rt.running,
+                  deskflowPid: rt.pid,
                   deskflowPath: coreExePath(pluginConfig),
                   backendReady: fs.existsSync(coreExePath(pluginConfig)),
                   elevated: isElevated(),
                   coreInstances: (listImagePids('deskflow-core.exe') || []).length,
-                  // 退出监管相关：keepRunningOnExit=false 时，DSH 关闭会一并停止核心；
-                  // corePidFile 是落盘记录，DSH 被 taskkill 强杀时可据此认出残留进程
-                  keepRunningOnExit: pluginConfig.keepRunningOnExit === true,
-                  corePidFile: readCorePid(),
+                  // 生命周期相关：keepRunningOnExit 默认 true（关掉界面核心继续跑），
+                  // 下次连接时若签名一致就直接接管，不会起第二个进程
+                  keepRunningOnExit: pluginConfig.keepRunningOnExit !== false,
+                  adoptedCore: rt.adopted,
+                  coreState: rt.state,
                   firewall: firewallState(),
                   confPath: confPath(),
                   port: corePort,
@@ -871,7 +976,7 @@ export function apply(ctx, config) {
                   corePids: corePids || [],
                   guiPids: guiPids || [],
                   coreMode: readCoreMode(),
-                  coreRunning: !!deskflowChild,
+                  coreRunning: coreRuntime().running,
                   port: corePort,
                   firewall: fw,
                 },
@@ -917,7 +1022,7 @@ export function apply(ctx, config) {
         peers: peerList(),
         coreMode: readCoreMode(),
         coreModeName: { 0: '未连接', 1: '客户端', 2: '服务端' }[readCoreMode()] || '未知',
-        deskflowRunning: !!deskflowChild,
+        deskflowRunning: coreRuntime().running,
         deskflowPid: deskflowChild?.pid || null,
         deskflowPath: coreExePath(pluginConfig),
         launchMode: launchMode(pluginConfig),
@@ -974,7 +1079,7 @@ export function apply(ctx, config) {
         platform: process.platform,
         corePids: corePids || [],
         guiPids: guiPids || [],
-        coreRunning: !!deskflowChild,
+        coreRunning: coreRuntime().running,
         coreMode: readCoreMode(),
         firewall: fw,
       };

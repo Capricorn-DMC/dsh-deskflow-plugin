@@ -82,20 +82,27 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 | `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom） |
 | `port` | `24800` | 本机 Deskflow core 端口（随发现广播一起声明） |
 | `staticPeers` | `[]` | 固定对端 IP 列表（如 `["192.168.100.101"]`）：广播被 VPN/网络策略吞掉时以单播兜底互相发现 |
-| `keepRunningOnExit` | `false` | `false`=关闭 DSH 时一并停止本插件拉起的后台核心；`true`=核心常驻（关界面仍保持键鼠共享） |
+| `keepRunningOnExit` | `true` | `true`=关闭 DSH 后核心继续跑（键鼠共享不中断，下次连接直接接管）；`false`=关界面即停核心 |
 | `heartbeat` | `false` | 服务端心跳检测。默认关闭：5s 心跳写失败会在握手约 10s 后掐断连接；确需僵尸会话检测时开启并配 `heartbeatInterval`（建议 ≥30000） |
 | `heartbeatInterval` | `30000` | 心跳间隔（毫秒），仅在 `heartbeat: true` 时生效 |
 
-### 进程生命周期
+### 进程生命周期：接管而不是重启
 
-后台核心用 `detached` 启动，早期版本注释里写的是"独立于 DSH 生命周期"，结果关掉 DSH 后 24800 仍在监听、客户端仍保持着连接。下次打开 DSH 再连接时，服务端日志会出现 `a client with name "xxx" is already connected` 并踢掉旧 socket——同名客户端互踢、切屏抖动多半源于此。
+后台核心用 `detached` 启动，DSH 关掉后它仍在跑、连接也还在——界面关掉后键鼠共享继续可用，这本身是想要的行为。
 
-现在默认**随 DSH 退出收敛**：插件在 `process.exit`、`SIGINT/SIGTERM/SIGHUP/SIGBREAK`、以及 cordis `dispose`（插件重载）时结束自己拉起的核心，并把 PID 记在 `~/.dsh/deskflow-core.pid`，便于热重载后仍能找到子进程。
+真正的坑在"重新连接"：再 spawn 一个同名客户端，服务端日志就会出现 `a client with name "xxx" is already connected` 并踢掉旧 socket，旧核心随即重连，两个进程互踢，表现就是切屏抖动、偶发断线。
 
-两个边界：
+所以做法是**接管**：
 
-- **想让核心常驻**（关掉界面仍保持键鼠共享）：配置 `keepRunningOnExit: true`
-- **DSH 被任务管理器强杀**：`exit` 钩子不会触发，核心会成为残留。插件下次启动时会自动清掉同名实例（`cleanupInstances`），面板"自检"也会报出来，不需要手工处理
+- 拉起核心时把签名（pid / 角色 / 对端 / 布局 / 模式）写进 `~/.dsh/deskflow-core.state.json`
+- 下次连接先读这份记录：pid 还活着、且确实是 `deskflow-core.exe`（防 pid 复用）、角色/对端/布局/模式全都一致 → **直接沿用**，不再起第二个进程，也不打断现有连接
+- 签名不一致才清理重启，保证不会"点了连接、实际连的还是上次那台"
+
+配套规则：
+
+- **默认不杀核心**（`keepRunningOnExit: true`）；想"关界面即停"的设 `false`，此时插件在 `process.exit`、`SIGINT/SIGTERM/SIGHUP/SIGBREAK`、cordis `dispose` 里结束核心
+- **旧实例清不掉就拒绝启动**：`taskkill` 结束提权进程会静默失败（典型场景：旧 core 以管理员启动、当前 DSH 没有），这时宁可报错让你处理，也不会再起一个去互踢。提示里会带上残留 PID
+- **DSH 被任务管理器强杀**：`exit` 钩子不触发，但不影响下次连接——签名一致就接管，不一致就清理，都不需要手工收拾
 
 ## 工作原理
 
