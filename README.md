@@ -130,13 +130,15 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 |---|---|---|
 | 2026-11 | 面板提示 `Unknown method: discovery` | DSH host 端运行的是旧版 index.js（UI 新 / host 旧）。**完全退出并重启 DeepSeek Harness** 使 host 重新加载插件即可；面板底部会显示 `UI vX / Host vY`，版本不一致时先重启 |
 | 2026-11 | 两端插件互不可见 / 添加设备连接失败 | DSH RPC 契约不匹配：host 侧曾返回 `{ok:true, result}`，而 DSH 契约要求 `{ok:true, value}`（失败为 `{ok:false, error:{code,message,details}}`）。已在 index.js 统一为契约形状，client.js 的 `hostCall` 同时做映射容错。**两端需保持插件版本一致**（git pull 后重启 DSH） |
-| 2026-11 | 服务端显示"已连接"但键鼠不通，重连报 `server already has a connected client with name "xxx"` | 客户端 core 异常退出后服务端残留**僵尸会话**（假在线），拒绝新连接。v1.2.1 起服务端 conf 写入 `server/enableHeartbeat=true`（5000ms）：客户端失联约 3 个心跳周期（~15 秒）即被服务端剔除。旧版需在服务端手动重启 Deskflow 会话清掉死连接 |
+| 2026-11 | 服务端显示"已连接"但键鼠不通，重连报 `server already has a connected client with name "xxx"` | 客户端 core 异常退出后服务端残留**僵尸会话**（假在线），拒绝新连接。v1.2.1 起服务端 conf 写入 `server/enableHeartbeat=true`（5000ms）：客户端失联约 3 个心跳周期（~15 秒）即被服务端剔除。旧版需在服务端手动重启 Deskflow 会话清掉死连接。**注意**：后续实测该心跳实现会在握手约 10 秒后因写 socket 失败掐断连接，v1.6.0 起默认关闭（`heartbeat: false`），僵尸会话改用 v1.6.0 的"接管"机制规避 |
+| 2026-11 | 切到对端后光标卡在屏幕边缘、被弹回，且日志出现 `a client with name "xxx" is already connected` | 同机存在两个同名客户端 core（旧进程没清掉，`taskkill` 对提权进程会静默失败），互相把对方的 socket 踢下线。v1.4.0 起清理后复查残留；v1.6.0 起签名一致则直接接管、残留清不掉则拒绝启动。**不是权限问题**——非管理员同样能注入键鼠 |
 
 ## 已知限制
 
 - 后端直接随仓库附带（`backend/` 目录）：deskflow-core/deskflow/deskflow-daemon + Qt6 DLL/插件 + OpenSSL 3（`libssl-3-x64.dll`、`libcrypto-3-x64.dll`）+ VC++ 运行时（VCRUNTIME140/MSVCP140 等），clone 即用，**无需单独安装 Qt/OpenSSL/VC++ 运行库**
 - headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
 - 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
+- **不需要管理员权限**：普通权限进程就能注入键鼠（本机服务端实测即如此）。只有两种情形会失效：前台停在提权窗口（任务管理器、UAC 弹窗）时注入被 UIPI 拦截，或对端停在锁屏/登录界面。此时改以管理员身份运行可绕过前者；插件不会再把"未提权"当作连接告警
 - 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core
 - 对端开 VPN（TUN 模式）可能吞掉发现广播：插件已内置单播兜底（对见过的对端 IP 直接单播 announce，缓存于 `~/.dsh/deskflow-peers.json`）；首次发现或缓存失效时，可在 cordis 配置 `staticPeers` 写死对端 IP，或临时关 VPN 完成首次配对
 

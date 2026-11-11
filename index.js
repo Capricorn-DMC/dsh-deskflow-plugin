@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.6.0';
+const PLUGIN_VERSION = '1.6.1';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -793,15 +793,18 @@ async function connect(args, config) {
   // 启动后随结果回传的自检警告，按"最容易踩坑"的顺序排列
   const warnings = [];
 
-  // 1) 提权：Windows 下未提权无法注入键盘鼠标，是"连上了但光标不动"的第一嫌疑
+  // 提权**不再**作为连接告警：实测非管理员运行也能正常注入键鼠（本机服务端就是普通权限），
+  // 它只在特定前提下才成为问题——前台是提权窗口（任务管理器/UAC）、或客户端停在锁屏。
+  // 无差别告警会制造假阳性，所以挪到 diagnose 的 notes 里，出问题时才看。
+  const notes = [];
   if (isElevated() === false) {
-    warnings.push('当前 DSH 未以管理员权限运行：Windows 下这类进程无法注入键盘鼠标，常见表现是切过去后光标卡在屏幕边缘被弹回——请右键「以管理员身份运行」重启 DSH');
+    notes.push('当前以普通权限运行（一般不影响使用；仅当前台是提权窗口、或客户端停在锁屏/登录界面时，才可能注入不了鼠标）');
   }
 
-  // 2) 多实例：旧实例没清干净会让同名客户端互踢，表现为切屏抖动、偶发断线
+  // 1) 多实例：旧实例没清干净会让同名客户端互踢，表现为切屏抖动、偶发断线
   for (const w of instanceWarnings(launched?.instanceCheck)) warnings.push(w);
 
-  // 3) 防火墙：服务端缺入站 TCP 24800 时对端连不上——"连接成功"但键鼠不通
+  // 2) 防火墙：服务端缺入站 TCP 24800 时对端连不上——"连接成功"但键鼠不通
   {
     const fw = firewallState() || (checkFirewall(), firewallState());
     if (fw && !fw.allOk) {
@@ -809,6 +812,13 @@ async function connect(args, config) {
       warnings.push(`防火墙未放行 ${missing}，对端可能无法连接（可在面板点「一键放行」）`);
     }
   }
+
+  // 接管时不能说"已启动"——核心根本没重启，这行文案是用户判断"有没有断线"的唯一依据
+  const startNote = launched?.adopted
+    ? `已接管仍在运行的后台核心（PID ${launched.pid}，配置一致，未重启）`
+    : (role === 'server'
+      ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(config)}）`
+      : `本机作为客户端，连接 ${ip}；后台核心已启动`);
 
   return {
     ok: launched.ok,
@@ -820,11 +830,8 @@ async function connect(args, config) {
     elevated: isElevated(),
     warning: warnings[0] || null,
     warnings,
-    message: launched.ok
-      ? (role === 'server'
-        ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(config)}）`
-        : `本机作为客户端，连接 ${ip}；后台核心已启动`)
-      : launched.message,
+    notes,
+    message: launched.ok ? startNote : launched.message,
   };
 }
 
@@ -955,28 +962,38 @@ export function apply(ctx, config) {
               return reply({ ok: false, error: { code: 'connect-failed', message: r?.message || '连接失败', details: {} } });
             }
             case 'diagnose': {
-              // 一键自检：把"连上了但键鼠不动"的两大本地成因（未提权 / 多实例）当场查清楚
+              // 一键自检：把"连上了但键鼠不动"的本地成因查清楚
               const corePids = listImagePids('deskflow-core.exe');
               const guiPids = listImagePids('deskflow.exe');
               const coreCount = corePids === null ? null : corePids.length;
               const guiCount = guiPids === null ? null : guiPids.length;
               const issues = [];
-              if (isElevated() === false) issues.push('未以管理员运行：无法注入键鼠，客户端光标会卡在屏幕边缘');
+              const notes = [];
+              // 提权不是问题本身：普通权限照样能注入（服务端就是普通权限在跑）。
+              // 只有前台是提权窗口、或对端停在锁屏时才会失效，所以只作提示
+              if (isElevated() === false) {
+                notes.push('以普通权限运行（正常）。若切到对端后光标卡在屏幕边缘动不了，先看对端是否停在锁屏/登录界面；仍不行再考虑以管理员身份运行');
+              }
               if (coreCount !== null && coreCount > 1) issues.push(`本机有 ${coreCount} 个 deskflow-core.exe 实例，同名客户端会互踢（PID ${corePids.join(', ')}）`);
               if (guiCount !== null && guiCount > 1) issues.push(`本机有 ${guiCount} 个 deskflow.exe 实例（PID ${guiPids.join(', ')}）`);
               const fw = firewallState();
               if (fw && !fw.allOk) issues.push('防火墙未放行 24800，对端可能连不上');
+              const rt = coreRuntime();
               return reply({
                 ok: true,
                 value: {
                   healthy: issues.length === 0,
                   issues,
+                  notes,
                   elevated: isElevated(),
                   platform: process.platform,
                   corePids: corePids || [],
                   guiPids: guiPids || [],
                   coreMode: readCoreMode(),
-                  coreRunning: coreRuntime().running,
+                  coreRunning: rt.running,
+                  adoptedCore: rt.adopted,
+                  coreState: rt.state,
+                  keepRunningOnExit: pluginConfig.keepRunningOnExit !== false,
                   port: corePort,
                   firewall: fw,
                 },
@@ -1060,26 +1077,34 @@ export function apply(ctx, config) {
 
   ctx.tools.register({
     name: 'deskflow_doctor',
-    description: '自检键鼠共享环境：检查当前进程是否以管理员运行（Windows 未提权会导致键鼠无法注入、光标卡在屏幕边缘）、本机是否有多个 deskflow 实例（同名客户端互踢会导致切屏抖动和偶发断线）、防火墙 24800 是否放行。出现"连接成功但鼠标不动"时先跑这个。',
+    description: '自检键鼠共享环境：检查本机是否有多个 deskflow 实例（同名客户端互踢会导致切屏抖动和偶发断线）、防火墙 24800 是否放行、当前核心是否被接管，并列出提示项（如普通权限运行）。出现"连接成功但鼠标不动"时先跑这个。',
     parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'object' }, render: renderJson },
     async execute() {
       const corePids = listImagePids('deskflow-core.exe');
       const guiPids = listImagePids('deskflow.exe');
       const issues = [];
-      if (isElevated() === false) issues.push('未以管理员运行：无法注入键鼠，客户端光标会卡在屏幕边缘');
+      const notes = [];
+      // 提权不是必要条件：普通权限也能注入键鼠，只有前台是提权窗口/对端锁屏时才会失效
+      if (isElevated() === false) {
+        notes.push('以普通权限运行（正常）。切到对端后光标卡在屏幕边缘时，先确认对端没停在锁屏/登录界面');
+      }
       if ((corePids || []).length > 1) issues.push(`本机有 ${corePids.length} 个 deskflow-core.exe 实例，同名客户端会互踢`);
       if ((guiPids || []).length > 1) issues.push(`本机有 ${guiPids.length} 个 deskflow.exe 实例`);
       const fw = firewallState();
       if (fw && !fw.allOk) issues.push('防火墙未放行 24800，对端可能连不上');
+      const rt = coreRuntime();
       return {
         healthy: issues.length === 0,
         issues,
+        notes,
         elevated: isElevated(),
         platform: process.platform,
         corePids: corePids || [],
         guiPids: guiPids || [],
-        coreRunning: coreRuntime().running,
+        coreRunning: rt.running,
+        adoptedCore: rt.adopted,
+        coreState: rt.state,
         coreMode: readCoreMode(),
         firewall: fw,
       };
