@@ -81,6 +81,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 | `launchMode` | `headless` | `headless`=后台核心无窗口；`gui`=拉起 Deskflow 窗口 |
 | `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom） |
 | `port` | `24800` | 本机 Deskflow core 端口（随发现广播一起声明） |
+| `staticPeers` | `[]` | 固定对端 IP 列表（如 `["192.168.100.101"]`）：广播被 VPN/网络策略吞掉时以单播兜底互相发现 |
 
 ## 工作原理
 
@@ -116,6 +117,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 - headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
 - 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
 - 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core
+- 对端开 VPN（TUN 模式）可能吞掉发现广播：插件已内置单播兜底（对见过的对端 IP 直接单播 announce，缓存于 `~/.dsh/deskflow-peers.json`）；首次发现或缓存失效时，可在 cordis 配置 `staticPeers` 写死对端 IP，或临时关 VPN 完成首次配对
 
 ## License
 

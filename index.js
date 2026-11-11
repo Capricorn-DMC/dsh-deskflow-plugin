@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.2.2';
+const PLUGIN_VERSION = '1.3.0';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -79,6 +79,28 @@ let deskflowChild = null;
 let corePort = DEFAULT_CORE_PORT;
 let discoveryEnabled = true; // 自动发现开关（RPC discovery 控制广播与记录）
 let discoveryError = null;   // 发现 socket 绑定失败原因（如端口被旧 DSH 实例占用）
+
+// ─── 单播兜底（VPN 场景）─────────────────────────────────────────────────────
+// 对端开 VPN（TUN 网卡抢默认路由）时，全局/定向广播可能进隧道而到不了物理局域网。
+// 兜底：除广播外，对「配置的静态对端」+「见过的对端 IP」直接单播 announce——
+// 单播按最长前缀匹配路由，一般不受 VPN 影响；双方任一方能收到即可互相发现。
+const PEERS_CACHE = path.join(os.homedir(), '.dsh', 'deskflow-peers.json');
+let staticPeers = [];       // cordis 配置 staticPeers: ['192.168.100.101', ...]
+let knownIps = new Set();   // 见过的对端 IP（持久化，断电重启用单播补路）
+
+function loadPeersCache() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(PEERS_CACHE, 'utf8'));
+    if (Array.isArray(arr)) knownIps = new Set(arr.filter((x) => typeof x === 'string' && x));
+  } catch { /* 首次运行或文件损坏则忽略 */ }
+}
+
+function savePeersCache() {
+  try {
+    fs.mkdirSync(path.dirname(PEERS_CACHE), { recursive: true });
+    fs.writeFileSync(PEERS_CACHE, JSON.stringify([...knownIps], null, 2), 'utf8');
+  } catch { /* 尽力而为 */ }
+}
 
 // ─── UDP 发现（复刻 C++ LanDiscovery 协议）──────────────────────────────────
 function broadcastTargets() {
@@ -105,6 +127,10 @@ function announce(leaving = false) {
   for (const target of broadcastTargets()) {
     try { socket.send(msg, DISCOVERY_PORT, target); } catch { /* 忽略单接口发送失败 */ }
   }
+  // 单播兜底：静态对端 + 见过的对端 IP（VPN/广播异常场景仍可互相发现）
+  for (const ip of new Set([...staticPeers, ...knownIps])) {
+    try { socket.send(msg, DISCOVERY_PORT, ip); } catch { /* ignore */ }
+  }
 }
 
 function stopDiscovery() {
@@ -121,6 +147,9 @@ function stopDiscovery() {
 function startDiscovery(config) {
   if (socket) return;
   corePort = Number(config?.port) > 0 ? Number(config.port) : DEFAULT_CORE_PORT;
+  staticPeers = Array.isArray(config?.staticPeers)
+    ? config.staticPeers.filter((x) => typeof x === 'string' && x) : [];
+  loadPeersCache();
   const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
   socket = sock;
   sock.on('message', (buf, rinfo) => {
@@ -131,6 +160,7 @@ function startDiscovery(config) {
     if (msg.proto !== DISCOVERY_PROTO || typeof msg.instance !== 'string' || !msg.instance) return;
     if (msg.instance === instanceId) return; // 过滤自己（含 C++ 端共享端口场景）
     if (msg.leaving) { peers.delete(msg.instance); return; }
+    if (!knownIps.has(rinfo.address)) { knownIps.add(rinfo.address); savePeersCache(); }
     peers.set(msg.instance, {
       instance: msg.instance,
       name: typeof msg.name === 'string' && msg.name ? msg.name : 'unknown',
