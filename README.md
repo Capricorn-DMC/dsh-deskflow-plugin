@@ -121,6 +121,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 
 ## 已知限制
 
+- 后端包 `deskflow-backend-win64.zip` 自带全部运行依赖：deskflow-core/deskflow/deskflow-daemon + Qt6 DLL/插件 + OpenSSL 3（`libssl-3-x64.dll`、`libcrypto-3-x64.dll`）+ VC++ 运行时（VCRUNTIME140/MSVCP140 等），解压到 `~/.dsh/deskflow-backend` 即可运行，**无需单独安装 Qt/OpenSSL/VC++ 运行库**（首次使用自动解压）
 - headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
 - 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
 - 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core
