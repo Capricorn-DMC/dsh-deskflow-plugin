@@ -68,9 +68,14 @@
       const connection = c.get ? c.get('connection') : c.connection;
       if (connection?.rpc?.call) {
         try {
-          return await connection.rpc.call('/api', 'deskflow', { method, payload: payload || {} });
+          const ret = await connection.rpc.call('/api', 'deskflow', { method, payload: payload || {} });
+          // DSH 契约：成功 {ok:true, value}；失败 {ok:false, error:{code,message,details}}
+          // 面板内部契约：{ok, result} / {ok:false, error}
+          if (ret?.ok === true) return { ok: true, result: ret.value };
+          if (ret?.ok === false) return { ok: false, error: ret.error };
+          return { ok: false, error: { code: 'bad-shape', message: 'RPC 返回形状异常', details: {} } };
         } catch (e) {
-          return { ok: false, error: { message: `${e?.name || 'Error'}: ${e?.message || e}` } };
+          return { ok: false, error: { code: 'rpc-threw', message: `${e?.name || 'Error'}: ${e?.message || e}`, details: {} } };
         }
       }
       return { ok: false, error: { message: 'ctx.connection.rpc 不可用' } };

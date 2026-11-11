@@ -104,7 +104,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.1.0';
+const PLUGIN_VERSION = '1.1.1';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -549,7 +549,7 @@ export function apply(ctx, config) {
             case 'status': {
               return reply({
                 ok: true,
-                result: {
+                value: {
                   instance: instanceId,
                   name: selfName,
                   version: PLUGIN_VERSION,
@@ -568,27 +568,28 @@ export function apply(ctx, config) {
               });
             }
             case 'peers': {
-              return reply({ ok: true, result: { instance: instanceId, peers: peerList() } });
+              return reply({ ok: true, value: { instance: instanceId, peers: peerList() } });
             }
             case 'scan': {
               announce(false);
-              return reply({ ok: true, result: { instance: instanceId, peers: peerList() } });
+              return reply({ ok: true, value: { instance: instanceId, peers: peerList() } });
             }
             case 'discovery': {
               if (typeof rpcArgs?.enabled !== 'boolean') {
                 return reply({ ok: false, error: { code: 'bad-request', message: 'enabled 必须是 boolean', details: {} } });
               }
               const enabled = setDiscovery(rpcArgs.enabled, pluginConfig);
-              return reply({ ok: true, result: { ok: true, enabled } });
+              return reply({ ok: true, value: { ok: true, enabled } });
             }
             case 'connect': {
               const r = await connect(rpcArgs, pluginConfig);
-              return reply({ ok: r.ok, result: r });
+              if (r?.ok) return reply({ ok: true, value: r });
+              return reply({ ok: false, error: { code: 'connect-failed', message: r?.message || '连接失败', details: {} } });
             }
             case 'stop': {
               const killed = killDeskflowChild();
               try { patchConf({ core: { coreMode: 0 } }); } catch { /* ignore */ }
-              return reply({ ok: true, result: { stopped: true, killedProcess: killed, message: killed ? '已停止本机管理的 Deskflow 进程' : '没有由插件启动的 Deskflow 进程' } });
+              return reply({ ok: true, value: { stopped: true, killedProcess: killed, message: killed ? '已停止本机管理的 Deskflow 进程' : '没有由插件启动的 Deskflow 进程' } });
             }
             default:
               return reply({ ok: false, error: { code: 'unknown-method', message: `Unknown method: ${method}`, details: {} } });
