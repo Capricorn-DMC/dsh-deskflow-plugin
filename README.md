@@ -2,7 +2,7 @@
 
 把 [Deskflow](https://github.com/deskflow/deskflow) 键鼠共享功能做成 **DeepSeek Harness（DSH）桌面客户端的原生插件**。
 
-在局域网内自动发现同样安装了本插件（或 Deskflow fork 版）的电脑，弹出角色协商提示（服务端 / 客户端），选择后自动写入 Deskflow 配置并拉起 Deskflow 后端完成键鼠共享连接。
+在局域网内自动发现同样安装了本插件（或 Deskflow fork 版）的电脑，弹出二选一：**用本机键鼠控制对方**（本机作服务端）或**用对方键鼠控制本机**（本机作客户端），选择后自动写入 Deskflow 配置并拉起 Deskflow 后端完成键鼠共享连接。
 
 ## 功能
 
@@ -12,8 +12,9 @@
   - 本机作为**服务端** —— 用本机键鼠控制对方
   - 本机作为**客户端** —— 使用对方键鼠控制本机
 - **自动连接（headless 无窗口）**：写 Deskflow QSettings 配置后直接拉起后台核心 `deskflow-core.exe`（服务端自动登记屏幕与边缘切换链接），全程无 Deskflow 窗口，交互都在插件面板完成
-- **AI 工具**：向 DSH 注册 4 个可被智能体调用的工具
-  - `deskflow_status` / `deskflow_scan_peers` / `deskflow_connect` / `deskflow_disconnect`
+- **AI 工具**：向 DSH 注册 5 个可被智能体调用的工具
+  - `deskflow_status` / `deskflow_scan_peers` / `deskflow_connect` / `deskflow_disconnect` / `deskflow_doctor`（自检：多实例、防火墙、核心状态）
+- **进程接管**：关掉 DSH 后后台核心继续跑，下次连接按签名（pid/角色/对端/布局/模式）沿用同一个进程，不再产生第二个同名客户端互踢
 
 ## 环境要求
 
@@ -126,22 +127,34 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 
 ## 版本兼容记录
 
-| 日期 | 现象 | 原因与修复 |
+当前版本 **1.1.0**：`package.json` 的 `version`、`index.js` 的 `PLUGIN_VERSION`、`client.js` 的 `UI_VERSION` 三处一致，面板底部显示 `UI v1.1.0 / Host v1.1.0`。
+
+| 现象 | 原因 | 现状（1.1.0） |
 |---|---|---|
-| 2026-11 | 面板提示 `Unknown method: discovery` | DSH host 端运行的是旧版 index.js（UI 新 / host 旧）。**完全退出并重启 DeepSeek Harness** 使 host 重新加载插件即可；面板底部会显示 `UI vX / Host vY`，版本不一致时先重启 |
-| 2026-11 | 两端插件互不可见 / 添加设备连接失败 | DSH RPC 契约不匹配：host 侧曾返回 `{ok:true, result}`，而 DSH 契约要求 `{ok:true, value}`（失败为 `{ok:false, error:{code,message,details}}`）。已在 index.js 统一为契约形状，client.js 的 `hostCall` 同时做映射容错。**两端需保持插件版本一致**（git pull 后重启 DSH） |
-| 2026-11 | 服务端显示"已连接"但键鼠不通，重连报 `server already has a connected client with name "xxx"` | 客户端 core 异常退出后服务端残留**僵尸会话**（假在线），拒绝新连接。v1.2.1 起服务端 conf 写入 `server/enableHeartbeat=true`（5000ms）：客户端失联约 3 个心跳周期（~15 秒）即被服务端剔除。旧版需在服务端手动重启 Deskflow 会话清掉死连接。**注意**：后续实测该心跳实现会在握手约 10 秒后因写 socket 失败掐断连接，v1.6.0 起默认关闭（`heartbeat: false`），僵尸会话改用 v1.6.0 的"接管"机制规避 |
-| 2026-11 | 切到对端后光标卡在屏幕边缘、被弹回，且日志出现 `a client with name "xxx" is already connected` | 同机存在两个同名客户端 core（旧进程没清掉，`taskkill` 对提权进程会静默失败），互相把对方的 socket 踢下线。v1.4.0 起清理后复查残留；v1.6.0 起签名一致则直接接管、残留清不掉则拒绝启动。**不是权限问题**——非管理员同样能注入键鼠 |
+| 面板提示 `Unknown method: discovery` | DSH host 侧跑的还是旧 `index.js`（UI 新 / host 旧） | 完全退出并重启 DeepSeek Harness 才会重新加载插件。面板底部的 `UI vX / Host vY` 就是为这个准备的，两者不一致先重启 |
+| 两端插件互不可见、或添加设备后连接失败 | DSH RPC 契约不匹配：host 侧曾返回 `{ok:true, result}`，契约要求 `{ok:true, value}`（失败为 `{ok:false, error:{code,message,details}}`） | index.js 已统一为契约形状，client.js 的 `hostCall` 同时做映射容错。**两端保持同一版本**，`git pull` 后两端都要重启 DSH |
+| 服务端显示"已连接"但键鼠不通，重连报 `server already has a connected client with name "xxx"` | 客户端 core 异常退出后服务端残留**僵尸会话**（假在线），拒绝新连接 | 不再靠心跳踢会话，改为从源头避免第二个同名连接（接管机制）；真出现僵尸会话时，在对端断开重连或重启 core 即可清掉 |
+| 服务端开启心跳后，连接在握手约 10 秒后准时断一次并循环重连 | `server/enableHeartbeat=true` 每 5s 往客户端 socket 写一次，写失败即掐断连接（10s = 2 个心跳周期，整齐得不像网络抖动） | `heartbeat` 默认 **false**；确需僵尸会话检测再显式开启，并把 `heartbeatInterval` 调到 30000 以上 |
+| 切到对端后光标卡在屏幕边缘、被弹回，日志同时出现 `already connected` | 同机存在两个同名客户端 core，互相把对方 socket 踢下线（旧进程没清掉，而 `taskkill` 对提权进程是静默失败） | 启动前清理并**复查残留**；签名一致直接接管、不产生第二个进程；残留清不掉就拒绝启动并给出 PID。**这不是权限问题**——非管理员同样能注入键鼠 |
+| 连接时提示「有 1 个旧的 deskflow-core.exe 结束不掉（PID x）」 | 探活用 `process.kill(pid, 0)` 的异常判断生死，而 Windows 下对提权进程它抛的是 `EPERM`（进程活着），于是现存核心既没被接管、也杀不掉 | `EPERM` 视为存活、`ESRCH` 才是真退出；杀不掉时保留签名，下次仍可接管。报错会一并说明没能接管的原因（角色/对端/布局不一致，或无签名记录） |
+
+前提条件：**两端插件版本一致，且两端都重启过 DSH**。UI 与 host 不一致时，问题通常以 `Unknown method` 或参数缺失的形式暴露出来。
+
+DSH 版本要求：`0.2.1+`（依赖 `~/.dsh/profiles/*/node_modules/@local/*` 外部插件加载与 `connection.fetch` 的 RPC 注册）。
 
 ## 已知限制
 
-- 后端直接随仓库附带（`backend/` 目录）：deskflow-core/deskflow/deskflow-daemon + Qt6 DLL/插件 + OpenSSL 3（`libssl-3-x64.dll`、`libcrypto-3-x64.dll`）+ VC++ 运行时（VCRUNTIME140/MSVCP140 等），clone 即用，**无需单独安装 Qt/OpenSSL/VC++ 运行库**
-- headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
-- 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
-- **不需要管理员权限**：普通权限进程就能注入键鼠（本机服务端实测即如此）。只有两种情形会失效：前台停在提权窗口（任务管理器、UAC 弹窗）时注入被 UIPI 拦截，或对端停在锁屏/登录界面。此时改以管理员身份运行可绕过前者；插件不会再把"未提权"当作连接告警
-- 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core
-- **探活不能用 `process.kill(pid, 0)` 的异常判断生死**：Windows 下对提权进程它抛的是 `EPERM`（进程活着，只是无权访问），一律当"已退出"会把提权运行的核心误判为不存在——接管被跳过、又杀不掉它，最终报「有 1 个旧的 deskflow-core.exe 结束不掉」。v1.6.3 起 `EPERM` 视为存活，`ESRCH` 才是真退出
-- 对端开 VPN（TUN 模式）可能吞掉发现广播：插件已内置单播兜底（对见过的对端 IP 直接单播 announce，缓存于 `~/.dsh/deskflow-peers.json`）；首次发现或缓存失效时，可在 cordis 配置 `staticPeers` 写死对端 IP，或临时关 VPN 完成首次配对
+- **后端随仓库附带**（`backend/`：deskflow-core / deskflow / deskflow-daemon + Qt6 DLL 与插件 + OpenSSL 3 + VC++ 运行时），clone 即用，无需单独安装 Qt/OpenSSL/VC++；与官方 Deskflow 安装版互不影响，卸载官方版也不影响本插件
+- **headless 模式关闭 TLS**（`security/tlsEnabled=false`）：插件没有证书生成能力，LAN 内明文传输；与 Deskflow fork 互操作时对端也需关闭
+- **不需要管理员权限**：普通权限进程就能注入键鼠（本机服务端实测如此）。只有两种情形会失效——前台停在提权窗口（任务管理器、UAC 弹窗）时注入被 UIPI 拦截，或对端停在锁屏/登录界面。插件不会把"未提权"当作连接告警
+- **同机只允许一个 core**：启动前 `taskkill` 同名旧进程并复查；残留清不掉（典型场景：旧 core 以管理员启动、当前 DSH 没有）就**拒绝启动**，不会为了连上而制造两个同名客户端互踢，报错会带上残留 PID
+- **关掉 DSH 不会停核心**（`keepRunningOnExit` 默认 `true`）：键鼠共享不中断，下次打开界面直接接管同一个进程；想"关界面即停"设成 `false`，此时在 `process.exit`、`SIGINT/SIGTERM/SIGHUP/SIGBREAK`、cordis `dispose` 里结束核心
+- **不做心跳保活**（`heartbeat` 默认 `false`）：代价是不主动清理僵尸会话，由"签名一致才接管、不一致才重启"覆盖；确需检测时显式开启并把间隔拉长到 30s 以上
+- **探活不能只看 `process.kill(pid, 0)` 的异常**：Windows 下对提权/高完整性进程它抛的是 `EPERM`（进程活着，只是无权访问），一律当"已退出"会让提权运行的核心既无法接管、又杀不掉，最终报一句极具误导性的"结束不掉"
+- **DSH 被任务管理器强杀**：`exit` 钩子不会触发，核心会残留；下次连接按签名接管或清理，不需要手工收拾
+- **GUI 与 headless 不互相接管**：`launchMode` 不同会导致签名不一致（`mode` 字段不同），切换模式会重启核心
+- **屏幕名 = 计算机主机名**：若对端曾用 Deskflow GUI 改过 `core/computerName`，屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
+- **对端开 VPN（TUN 模式）可能吞掉发现广播**：已内置单播兜底（对见过的对端 IP 直接单播 announce，缓存于 `~/.dsh/deskflow-peers.json`）；首次发现或缓存失效时，可在 cordis 配置 `staticPeers` 写死对端 IP，或临时关 VPN 完成首次配对
 
 ## License
 
