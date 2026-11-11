@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.6.2';
+const PLUGIN_VERSION = '1.6.3';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -431,7 +431,9 @@ function killDeskflowChild() {
     if (killPidSync(pid)) killed = true;
   }
   managedPid = null;
-  clearCoreState();
+  // 没杀掉（典型：核心是提权启动的）就保留签名——清掉的话下次连接既无法接管、也清不掉，
+  // 只会绕回去报"有 1 个旧的核心结束不掉"
+  if (!pid || !pidAlive(pid)) clearCoreState();
   return killed;
 }
 
@@ -448,9 +450,27 @@ function killDeskflowChild() {
 const CORE_STATE_FILE = path.join(os.homedir(), '.dsh', 'deskflow-core.state.json');
 let managedPid = null;   // 当前受管的 core：自己 spawn 的，或接管来的
 
+// 探活：Windows 下 process.kill(pid, 0) 对"高完整性（提权）进程"抛的是 EPERM 而不是成功
+// （实测 services.exe / lsass.exe / winlogon.exe 都是 EPERM），进程其实活得好好的。
+// 旧实现把异常一律当成"已退出"，于是提权启动的核心被判为"没在跑"→ 接管被跳过 →
+// 转而走"清理+启动"，又因为 taskkill 杀不掉提权进程，最后报「有 1 个旧的
+// deskflow-core.exe 结束不掉」。看起来像权限问题，根子在这个探活判断。
+function procExists(pid) {
+  if (process.platform !== 'win32') return false;
+  try {
+    const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    return out.split(/\r?\n/).some((line) => line.includes(`,"${pid}",`));
+  } catch { return false; }
+}
+
 function pidAlive(pid) {
   if (!pid) return false;
-  try { process.kill(pid, 0); return true; } catch { return false; }
+  try { process.kill(pid, 0); return true; }
+  catch (e) {
+    if (e && e.code === 'EPERM') return true;   // 存在，只是权限不够（提权进程）
+    if (e && e.code === 'ESRCH') return false;  // 确实不存在
+    return procExists(pid);                     // 其它错误码：交给 tasklist 复核
+  }
 }
 
 function readCoreState() {
@@ -767,6 +787,8 @@ async function connect(args, config) {
   try { file = patchConf(updates); } catch (e) {
     return { ok: false, message: `写入配置失败：${e?.message || e}` };
   }
+  // 没走到接管时的原因，失败时一并回传：否则用户只看到"结束不掉"，不知道明明有核心却没接管
+  let adoptNote = null;
   const launched = await (async () => {
     // 先看有没有可接管的核心：DSH 关掉后 core 可能还在跑且连接正常，
     // 直接沿用比再 spawn 一个安全得多（同机两个同名客户端会在服务端互踢）
@@ -783,12 +805,23 @@ async function connect(args, config) {
         const a = adoptCore(state, want);
         return { ok: true, adopted: true, pid: a.pid, startedAt: a.startedAt, instanceCheck: null, message: `已接管仍在运行的后台核心（PID ${a.pid}，配置一致，未重启）` };
       }
+      if (state) {
+        adoptNote = verdict.reason;
+      } else {
+        // 没有签名记录：多半是旧版插件、另一个 dsh profile、或 Deskflow GUI 起的核心
+        const pids = listImagePids('deskflow-core.exe') || [];
+        if (pids.length) adoptNote = `正在跑的 ${pids.length} 个核心没有签名记录（PID ${pids.join(', ')}），无法确认它的角色/对端，不能贸然沿用`;
+      }
       if (state && String(verdict.reason || '').startsWith('已有核心')) {
         console.log(`[deskflow] 现存核心与本次连接不一致，将重启：${verdict.reason}`);
       }
     }
     return launchMode(config) === 'gui' ? await launchGui(config, role) : await launchHeadless(config, role, peerName || ip);
   })();
+
+  if (launched && launched.ok === false && adoptNote) {
+    launched.message = `${launched.message}（没能接管现有核心的原因：${adoptNote}）`;
+  }
 
   // 启动后随结果回传的自检警告，按"最容易踩坑"的顺序排列
   const warnings = [];

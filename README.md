@@ -140,6 +140,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 - 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
 - **不需要管理员权限**：普通权限进程就能注入键鼠（本机服务端实测即如此）。只有两种情形会失效：前台停在提权窗口（任务管理器、UAC 弹窗）时注入被 UIPI 拦截，或对端停在锁屏/登录界面。此时改以管理员身份运行可绕过前者；插件不会再把"未提权"当作连接告警
 - 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core
+- **探活不能用 `process.kill(pid, 0)` 的异常判断生死**：Windows 下对提权进程它抛的是 `EPERM`（进程活着，只是无权访问），一律当"已退出"会把提权运行的核心误判为不存在——接管被跳过、又杀不掉它，最终报「有 1 个旧的 deskflow-core.exe 结束不掉」。v1.6.3 起 `EPERM` 视为存活，`ESRCH` 才是真退出
 - 对端开 VPN（TUN 模式）可能吞掉发现广播：插件已内置单播兜底（对见过的对端 IP 直接单播 announce，缓存于 `~/.dsh/deskflow-peers.json`）；首次发现或缓存失效时，可在 cordis 配置 `staticPeers` 写死对端 IP，或临时关 VPN 完成首次配对
 
 ## License
