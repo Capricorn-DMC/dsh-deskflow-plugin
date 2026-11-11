@@ -505,14 +505,19 @@ function stateCoreAlive(state) {
   return Array.isArray(pids) ? pids.includes(state.pid) : true;
 }
 
-// 同步结束进程树：'exit' 事件里不能 await，只能 execSync
+// 同步结束进程树：'exit' 事件里不能 await，只能 spawnSync（参数数组，不经 shell）
 function killPidSync(pid) {
   if (!pid) return false;
   if (process.platform === 'win32') {
+    let status = null;
     try {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 4000, windowsHide: true });
-      return true;
+      const r = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 4000, windowsHide: true });
+      status = r.error ? null : r.status;
     } catch { return false; }
+    // spawnSync 不像 execSync 那样在非零退出码时抛错，必须自己判：
+    // 0 才算成功；其余（典型是权限不足）再确认一次是否真的已经退出
+    if (status === 0) return true;
+    return !pidAlive(pid);
   }
   try { process.kill(pid, 'SIGTERM'); return true; } catch { return false; }
 }
