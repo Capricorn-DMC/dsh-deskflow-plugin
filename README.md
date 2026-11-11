@@ -109,6 +109,13 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 - 连接动作 = 修改 `%APPDATA%\DeepSeek Harness\DeepSeek Harness.conf`（`core/coreMode`、`client/remoteHost`、`security/tlsEnabled=false`，服务端额外写 `[computer_N]` 屏幕分组 + `deskflow-server.conf` 边缘切换链接）+ 后台启动 `deskflow-core.exe server|client -s <conf>`，Deskflow 原有全部功能不受影响
 - 屏幕名 = 计算机主机名（与 core 默认自命名一致）；screens 存于通用配置 `[computer_N]` 分组，server config 文件只承载 links/options（本版本 Deskflow 行为）
 
+## 版本兼容记录
+
+| 日期 | 现象 | 原因与修复 |
+|---|---|---|
+| 2026-11 | 面板提示 `Unknown method: discovery` | DSH host 端运行的是旧版 index.js（UI 新 / host 旧）。**完全退出并重启 DeepSeek Harness** 使 host 重新加载插件即可；面板底部会显示 `UI vX / Host vY`，版本不一致时先重启 |
+| 2026-11 | 两端插件互不可见 / 添加设备连接失败 | DSH RPC 契约不匹配：host 侧曾返回 `{ok:true, result}`，而 DSH 契约要求 `{ok:true, value}`（失败为 `{ok:false, error:{code,message,details}}`）。已在 index.js 统一为契约形状，client.js 的 `hostCall` 同时做映射容错。**两端需保持插件版本一致**（git pull 后重启 DSH） |
+
 ## 已知限制
 
 - headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
