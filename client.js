@@ -56,7 +56,7 @@
       badgeErr: { background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 15%, transparent)', color: T.error },
       msgOk: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)', color: T.success, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 30%, transparent)' },
       msgErr: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)', color: T.error, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent)' },
-      msgWarn: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d97706) 12%, transparent)', color: 'var(--dsw-alias-state-warning-primary, #d97706)', border: '1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d97706) 30%, transparent)' },
+      msgWarn: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, whiteSpace: 'pre-line', lineHeight: 1.6, background: 'color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d97706) 12%, transparent)', color: 'var(--dsw-alias-state-warning-primary, #d97706)', border: '1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d97706) 30%, transparent)' },
       empty: { textAlign: 'center', padding: '18px 8px', color: T.text3, fontSize: 12, lineHeight: 1.6 },
       note: { fontSize: 11, color: T.text3, margin: '8px 0 0 0', lineHeight: 1.5 },
       input: { width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text, fontSize: 12, fontFamily: FONT, outline: 'none' },
@@ -171,8 +171,12 @@
         setBusy(false);
         const r = res?.result;
         if (res?.ok && r?.ok) {
-          setMsg(r.warning
-            ? { type: 'warn', text: `${r.message}；⚠ ${r.warning}` }
+          // 后端可能同时返回多条自检提示（未提权 / 多实例 / 防火墙），全部展示，避免只看到第一条
+          const warns = Array.isArray(r.warnings) && r.warnings.length
+            ? r.warnings
+            : (r.warning ? [r.warning] : []);
+          setMsg(warns.length
+            ? { type: 'warn', text: `${r.message}\n${warns.map((w) => `⚠ ${w}`).join('\n')}` }
             : { type: 'ok', text: r.message });
           setModalPeer(null);
           refresh();
