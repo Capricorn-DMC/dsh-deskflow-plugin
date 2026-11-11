@@ -117,6 +117,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 |---|---|---|
 | 2026-11 | 面板提示 `Unknown method: discovery` | DSH host 端运行的是旧版 index.js（UI 新 / host 旧）。**完全退出并重启 DeepSeek Harness** 使 host 重新加载插件即可；面板底部会显示 `UI vX / Host vY`，版本不一致时先重启 |
 | 2026-11 | 两端插件互不可见 / 添加设备连接失败 | DSH RPC 契约不匹配：host 侧曾返回 `{ok:true, result}`，而 DSH 契约要求 `{ok:true, value}`（失败为 `{ok:false, error:{code,message,details}}`）。已在 index.js 统一为契约形状，client.js 的 `hostCall` 同时做映射容错。**两端需保持插件版本一致**（git pull 后重启 DSH） |
+| 2026-11 | 服务端显示"已连接"但键鼠不通，重连报 `server already has a connected client with name "xxx"` | 客户端 core 异常退出后服务端残留**僵尸会话**（假在线），拒绝新连接。v1.2.1 起服务端 conf 写入 `server/enableHeartbeat=true`（5000ms）：客户端失联约 3 个心跳周期（~15 秒）即被服务端剔除。旧版需在服务端手动重启 Deskflow 会话清掉死连接 |
 
 ## 已知限制
 

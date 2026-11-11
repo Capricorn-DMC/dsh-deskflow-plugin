@@ -1,4 +1,4 @@
-/**
+﻿/**
  * DeskFlow DSH Plugin (server side)
  *
  * 把 Deskflow 键鼠共享能力做成 DeepSeek Harness 插件：
@@ -104,7 +104,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.2.0';
+const PLUGIN_VERSION = '1.2.1';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -493,7 +493,15 @@ async function launchHeadless(config, role, peerName) {
   if (role === 'server') {
     const serverConf = writeServerConfig(config, peerName);
     patchConf({
-      server: { externalConfig: 'true', externalConfigFile: serverConf.replace(/\\/g, '/') },
+      server: {
+        externalConfig: 'true',
+        externalConfigFile: serverConf.replace(/\\/g, '/'),
+        // 心跳检测：服务端解析 server config 的 options 段时注入 kOptionHeartbeat
+        // （Config.cpp readSectionOptions 从主 conf 读这两个键），
+        // 客户端失联约 3 个心跳周期即被剔除，避免 core 异常退出后服务端残留僵尸会话"假在线"
+        enableHeartbeat: 'true',
+        heartbeat: '5000',
+      },
     });
     return await launchProcess(config, exe, ['server', ...args], '键鼠共享服务端核心', { killImage: 'deskflow-core.exe' });
   }

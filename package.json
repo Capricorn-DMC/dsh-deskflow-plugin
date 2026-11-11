@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "@local/deskflow",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Deskflow keyboard/mouse sharing as a DeepSeek Harness plugin: LAN auto-discovery (UDP 40801), role negotiation UI, auto-connect via the bundled Deskflow backend",

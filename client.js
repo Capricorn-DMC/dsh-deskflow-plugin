@@ -1,4 +1,4 @@
-// ─── DeskFlow DSH 插件客户端（Web UI）────────────────────────────────────────
+﻿// ─── DeskFlow DSH 插件客户端（Web UI）────────────────────────────────────────
 // 双协议加载器：
 //   新 DSH: window.__ModuleLoader__.load({ id, factory(require) })
 //   旧 DSH: module.exports = { inject, apply(ctx) }
@@ -12,7 +12,7 @@
     try { ReactDOM = require('react-dom'); } catch { /* 降级为非 portal 渲染 */ }
 
     // UI 版本（与 package.json version 同步；面板底部显示 "UI vX / Host vY" 用于排查 host 未重载）
-    const UI_VERSION = '1.2.0';
+    const UI_VERSION = '1.2.1';
 
     // 真实 cordis ctx 在 apply() 捕获；组件不通过 props 读它
     let realCtx = null;
