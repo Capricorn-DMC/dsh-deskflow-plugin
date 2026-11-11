@@ -82,6 +82,20 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 | `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom） |
 | `port` | `24800` | 本机 Deskflow core 端口（随发现广播一起声明） |
 | `staticPeers` | `[]` | 固定对端 IP 列表（如 `["192.168.100.101"]`）：广播被 VPN/网络策略吞掉时以单播兜底互相发现 |
+| `keepRunningOnExit` | `false` | `false`=关闭 DSH 时一并停止本插件拉起的后台核心；`true`=核心常驻（关界面仍保持键鼠共享） |
+| `heartbeat` | `false` | 服务端心跳检测。默认关闭：5s 心跳写失败会在握手约 10s 后掐断连接；确需僵尸会话检测时开启并配 `heartbeatInterval`（建议 ≥30000） |
+| `heartbeatInterval` | `30000` | 心跳间隔（毫秒），仅在 `heartbeat: true` 时生效 |
+
+### 进程生命周期
+
+后台核心用 `detached` 启动，早期版本注释里写的是"独立于 DSH 生命周期"，结果关掉 DSH 后 24800 仍在监听、客户端仍保持着连接。下次打开 DSH 再连接时，服务端日志会出现 `a client with name "xxx" is already connected` 并踢掉旧 socket——同名客户端互踢、切屏抖动多半源于此。
+
+现在默认**随 DSH 退出收敛**：插件在 `process.exit`、`SIGINT/SIGTERM/SIGHUP/SIGBREAK`、以及 cordis `dispose`（插件重载）时结束自己拉起的核心，并把 PID 记在 `~/.dsh/deskflow-core.pid`，便于热重载后仍能找到子进程。
+
+两个边界：
+
+- **想让核心常驻**（关掉界面仍保持键鼠共享）：配置 `keepRunningOnExit: true`
+- **DSH 被任务管理器强杀**：`exit` 钩子不会触发，核心会成为残留。插件下次启动时会自动清掉同名实例（`cleanupInstances`），面板"自检"也会报出来，不需要手工处理
 
 ## 工作原理
 

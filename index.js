@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.4.0';
+const PLUGIN_VERSION = '1.5.0';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -87,6 +87,9 @@ let discoveryError = null;   // 发现 socket 绑定失败原因（如端口被�
 const PEERS_CACHE = path.join(os.homedir(), '.dsh', 'deskflow-peers.json');
 let staticPeers = [];       // cordis 配置 staticPeers: ['192.168.100.101', ...]
 let knownIps = new Set();   // 见过的对端 IP（持久化，断电重启用单播补路）
+
+// 后台核心的 PID 落盘：cordis 热重载会丢掉模块内变量，退出钩子只能靠它找回子进程
+const CORE_PID_FILE = path.join(os.homedir(), '.dsh', 'deskflow-core.pid');
 
 function loadPeersCache() {
   try {
@@ -427,6 +430,75 @@ function killDeskflowChild() {
   return false;
 }
 
+// ─── 生命周期监管：DSH 退出时收掉自己拉起的后台核心 ──────────────────────────
+// 历史行为：core 以 detached+unref 启动，注释写着"独立于 DSH 生命周期"，于是关掉 DSH 后
+// 24800 仍在监听、客户端仍保持连接。下次打开 DSH 再连接时，服务端就会发现同名客户端
+// 已经在连（`a client with name "x" is already connected`）并踢掉旧 socket——互踢、
+// 切屏抖动都由此而来。默认改为随 DSH 退出收敛；要常驻的显式配置 keepRunningOnExit: true。
+
+function writeCorePid(pid) {
+  try {
+    fs.mkdirSync(path.dirname(CORE_PID_FILE), { recursive: true });
+    fs.writeFileSync(CORE_PID_FILE, String(pid), 'utf8');
+  } catch { /* ignore */ }
+}
+
+function readCorePid() {
+  try {
+    const n = Number(fs.readFileSync(CORE_PID_FILE, 'utf8').trim());
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch { return null; }
+}
+
+function clearCorePidFile() {
+  try { fs.unlinkSync(CORE_PID_FILE); } catch { /* ignore */ }
+}
+
+function pidAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// 同步结束进程树：'exit' 事件里不能 await，只能 execSync
+function killPidSync(pid) {
+  if (!pid) return false;
+  if (process.platform === 'win32') {
+    try {
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', timeout: 4000, windowsHide: true });
+      return true;
+    } catch { return false; }
+  }
+  try { process.kill(pid, 'SIGTERM'); return true; } catch { return false; }
+}
+
+function stopCoreOnExit(config, reason) {
+  if (config?.keepRunningOnExit === true) return { skipped: 'keepRunningOnExit' };
+  const pid = deskflowChild?.pid || readCorePid();
+  if (!pid || !pidAlive(pid)) { clearCorePidFile(); return { pid: null }; }
+  const ok = killPidSync(pid);
+  if (ok) clearCorePidFile();
+  return { pid, killed: ok, reason };
+}
+
+let exitHookInstalled = false;
+function installExitHook(getConfig) {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  // 正常退出：dsh 关闭走这里
+  process.once('exit', () => { try { stopCoreOnExit(getConfig(), 'exit'); } catch { /* ignore */ } });
+  // 控制台 Ctrl-C / 服务停止：清理后把信号还给默认处理，避免吞掉 dsh 自己的退出流程
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+    try {
+      process.once(sig, () => {
+        try { stopCoreOnExit(getConfig(), sig); } catch { /* ignore */ }
+        if (process.listenerCount(sig) === 0) {
+          try { process.kill(process.pid, sig); } catch { /* ignore */ }
+        }
+      });
+    } catch { /* 平台不支持该信号则忽略 */ }
+  }
+}
+
 // ─── 运行环境自检：提权状态 / 多实例 ─────────────────────────────────────────
 // Windows 下这两件事都会直接造成"连接成功但键鼠不动"，现象容易和网络问题混淆：
 //  · 未提权：进程无法 SendInput/SetCursorPos 注入指针，切过去后光标钉在屏幕边缘，一推就被弹回
@@ -514,7 +586,11 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
     } catch { /* 打不开就退化为 ignore */ }
     const stdio = logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore';
     deskflowChild = spawn(exe, args, { detached: true, stdio });
+    const childPid = deskflowChild.pid;
+    writeCorePid(childPid);
     deskflowChild.on('exit', () => {
+      // 只清自己那条记录，避免误删后来者写的 pid
+      if (readCorePid() === childPid) clearCorePidFile();
       deskflowChild = null;
       if (logFd >= 0) { try { fs.closeSync(logFd); } catch { /* ignore */ } logFd = -1; }
     });
@@ -676,6 +752,17 @@ export function apply(ctx, config) {
   // host 进程退出时广播 leaving，对端立即摘除本机
   try { process.once('exit', () => { try { announce(true); } catch { /* ignore */ } }); } catch { /* ignore */ }
 
+  // 退出监管：DSH 关闭（或插件被重载）时收掉本插件拉起的后台核心，
+  // 默认开启；想让 core 常驻（关掉界面仍保持键鼠共享）配置 keepRunningOnExit: true
+  const staleCore = readCorePid();
+  if (staleCore && !pidAlive(staleCore)) clearCorePidFile();
+  installExitHook(() => pluginConfig);
+  try {
+    if (typeof ctx?.on === 'function') {
+      ctx.on('dispose', () => { try { stopCoreOnExit(pluginConfig, 'dispose'); } catch { /* ignore */ } });
+    }
+  } catch { /* 老版本 host 无 dispose 事件则只靠进程退出钩子 */ }
+
   // ── 面板 RPC：/api/deskflow ──
   if (ctx?.connection?.fetch?.register) {
     ctx.connection.fetch.register({
@@ -722,6 +809,10 @@ export function apply(ctx, config) {
                   backendReady: fs.existsSync(coreExePath(pluginConfig)),
                   elevated: isElevated(),
                   coreInstances: (listImagePids('deskflow-core.exe') || []).length,
+                  // 退出监管相关：keepRunningOnExit=false 时，DSH 关闭会一并停止核心；
+                  // corePidFile 是落盘记录，DSH 被 taskkill 强杀时可据此认出残留进程
+                  keepRunningOnExit: pluginConfig.keepRunningOnExit === true,
+                  corePidFile: readCorePid(),
                   firewall: firewallState(),
                   confPath: confPath(),
                   port: corePort,
