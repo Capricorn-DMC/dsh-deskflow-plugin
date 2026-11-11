@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.3.0';
+const PLUGIN_VERSION = '1.3.1';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -443,11 +443,21 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
     } catch { /* 没有旧实例则忽略 */ }
   }
   try {
-    // detached：后台核心独立于 DSH 生命周期，DSH 重启不影响键鼠共享
-    deskflowChild = spawn(exe, args, { detached: true, stdio: 'ignore' });
-    deskflowChild.on('exit', () => { deskflowChild = null; });
+    // detached：后台核心独立于 DSH 生命周期，DSH 重启不影响键鼠共享；
+    // stdout/stderr 落盘到 ~/.dsh/deskflow-core.log（每次启动截断），供排障与面板展示
+    const logPath = path.join(os.homedir(), '.dsh', 'deskflow-core.log');
+    let logFd = -1;
+    try {
+      logFd = fs.openSync(logPath, 'w');
+    } catch { /* 打不开就退化为 ignore */ }
+    const stdio = logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore';
+    deskflowChild = spawn(exe, args, { detached: true, stdio });
+    deskflowChild.on('exit', () => {
+      deskflowChild = null;
+      if (logFd >= 0) { try { fs.closeSync(logFd); } catch { /* ignore */ } logFd = -1; }
+    });
     deskflowChild.unref();
-    return { ok: true, pid: deskflowChild.pid, message: `${label}已启动（PID ${deskflowChild.pid}，后台运行）` };
+    return { ok: true, pid: deskflowChild.pid, logPath, message: `${label}已启动（PID ${deskflowChild.pid}，后台运行）` };
   } catch (e) {
     deskflowChild = null;
     return { ok: false, message: `启动失败：${e?.message || e}` };

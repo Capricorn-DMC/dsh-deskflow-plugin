@@ -12,7 +12,7 @@
     try { ReactDOM = require('react-dom'); } catch { /* 降级为非 portal 渲染 */ }
 
     // UI 版本（与 package.json version 同步；面板底部显示 "UI vX / Host vY" 用于排查 host 未重载）
-    const UI_VERSION = '1.3.0';
+    const UI_VERSION = '1.3.1';
 
     // 真实 cordis ctx 在 apply() 捕获；组件不通过 props 读它
     let realCtx = null;
