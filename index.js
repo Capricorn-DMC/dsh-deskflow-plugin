@@ -1,4 +1,4 @@
-﻿/**
+/**
  * DeskFlow DSH Plugin (server side)
  *
  * 把 Deskflow 键鼠共享能力做成 DeepSeek Harness 插件：

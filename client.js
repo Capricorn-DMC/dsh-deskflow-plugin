@@ -1,4 +1,4 @@
-﻿// ─── DeskFlow DSH 插件客户端（Web UI）────────────────────────────────────────
+// ─── DeskFlow DSH 插件客户端（Web UI）────────────────────────────────────────
 // 双协议加载器：
 //   新 DSH: window.__ModuleLoader__.load({ id, factory(require) })
 //   旧 DSH: module.exports = { inject, apply(ctx) }
