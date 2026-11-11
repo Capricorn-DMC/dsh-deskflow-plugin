@@ -5,8 +5,8 @@
  * - 局域网自动发现：UDP 40801 广播，协议与 Deskflow fork 内置 C++ 版一致
  *   （{proto:'deepseek-harness', ver:1, instance, name, port, leaving}，1.5s 周期，6s 超时）
  * - 角色协商连接：Web 面板里选服务端/客户端，写 Deskflow QSettings ini 后拉起 deskflow.exe
- * - RPC：/api/deskflow（status/peers/discovery/connect/stop/scan），供 client.js 面板调用
- * - Tools：deskflow_status / deskflow_scan_peers / deskflow_connect / deskflow_disconnect
+ * - RPC：/api/deskflow（status/peers/discovery/connect/stop/scan/diagnose），供 client.js 面板调用
+ * - Tools：deskflow_status / deskflow_scan_peers / deskflow_connect / deskflow_disconnect / deskflow_doctor
  */
 
 import dgram from 'dgram';
@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.3.1';
+const PLUGIN_VERSION = '1.4.0';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -427,6 +427,68 @@ function killDeskflowChild() {
   return false;
 }
 
+// ─── 运行环境自检：提权状态 / 多实例 ─────────────────────────────────────────
+// Windows 下这两件事都会直接造成"连接成功但键鼠不动"，现象容易和网络问题混淆：
+//  · 未提权：进程无法 SendInput/SetCursorPos 注入指针，切过去后光标钉在屏幕边缘，一推就被弹回
+//  · 多实例：同名客户端重复连接，服务端日志 `a client with name "x" is already connected` 后互踢
+// 两者还会叠加：旧实例是提权启动、新进程没提权时 taskkill 会失败，"清理孤儿"形同虚设
+let elevatedCache = null;
+function isElevated() {
+  if (elevatedCache !== null) return elevatedCache;
+  if (process.platform !== 'win32') {
+    elevatedCache = typeof process.getuid === 'function' ? process.getuid() === 0 : null;
+    return elevatedCache;
+  }
+  // net session 仅管理员可执行，比 spawn 一个 PowerShell 快一个数量级
+  try {
+    execSync('net session', { stdio: 'ignore', timeout: 3000, windowsHide: true });
+    elevatedCache = true;
+  } catch {
+    elevatedCache = false;
+  }
+  return elevatedCache;
+}
+
+function listImagePids(image) {
+  if (process.platform !== 'win32') return null;
+  try {
+    const out = execSync(`tasklist /FI "IMAGENAME eq ${image}" /FO CSV /NH`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    const pids = [];
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/^"[^"]+","(\d+)"/);
+      if (m) pids.push(Number(m[1]));
+    }
+    return pids;
+  } catch {
+    return null;
+  }
+}
+
+// 结束同镜像的全部残留实例，并复查是否真的清干净（taskkill 对提权进程会静默失败）
+function cleanupInstances(image) {
+  const before = listImagePids(image);
+  if (before === null) return { image, supported: false, before: 0, remaining: 0, ok: true };
+  if (before.length === 0) return { image, supported: true, before: 0, remaining: 0, ok: true };
+  try {
+    execSync(`taskkill /F /IM ${image}`, { stdio: 'ignore', timeout: 5000, windowsHide: true });
+  } catch { /* 没有实例或权限不足，交给下面的复查判断 */ }
+  const after = listImagePids(image) || [];
+  return {
+    image,
+    supported: true,
+    before: before.length,
+    remaining: after.length,
+    remainingPids: after,
+    ok: after.length === 0,
+  };
+}
+
+function instanceWarnings(check) {
+  if (!check || !check.remaining) return [];
+  const hint = isElevated() === false ? '（当前未以管理员运行，无法结束提权进程——这正是多实例的常见来源）' : '';
+  return [`残留 ${check.remaining} 个旧的 ${check.image} 实例未能结束${hint}，会导致同名客户端互踢、切屏抖动，请在任务管理器手动结束`];
+}
+
 async function launchProcess(config, exe, args, label, { killImage = null } = {}) {
   if (!fs.existsSync(exe)) {
     return { ok: false, message: `未找到后端：${exe}（插件自带 backend/ 目录缺失，可在插件配置 backendDir 中指定）` };
@@ -436,11 +498,11 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
     await new Promise(r => setTimeout(r, 800));
   }
   // 清理孤儿实例（DSH 重启后 detached 进程脱离句柄；同机只应有一个 core/GUI 实例）
+  // 注意：taskkill 结束提权进程需要管理员权限，失败后必须复查再决定是否继续
+  let instanceCheck = null;
   if (killImage && process.platform === 'win32') {
-    try {
-      execSync(`taskkill /F /IM ${killImage}`, { stdio: 'ignore', timeout: 5000 });
-      await new Promise(r => setTimeout(r, 500));
-    } catch { /* 没有旧实例则忽略 */ }
+    instanceCheck = cleanupInstances(killImage);
+    if (instanceCheck.before > 0) await new Promise(r => setTimeout(r, 500));
   }
   try {
     // detached：后台核心独立于 DSH 生命周期，DSH 重启不影响键鼠共享；
@@ -457,7 +519,7 @@ async function launchProcess(config, exe, args, label, { killImage = null } = {}
       if (logFd >= 0) { try { fs.closeSync(logFd); } catch { /* ignore */ } logFd = -1; }
     });
     deskflowChild.unref();
-    return { ok: true, pid: deskflowChild.pid, logPath, message: `${label}已启动（PID ${deskflowChild.pid}，后台运行）` };
+    return { ok: true, pid: deskflowChild.pid, logPath, instanceCheck, message: `${label}已启动（PID ${deskflowChild.pid}，后台运行）` };
   } catch (e) {
     deskflowChild = null;
     return { ok: false, message: `启动失败：${e?.message || e}` };
@@ -556,15 +618,26 @@ async function connect(args, config) {
     ? await launchGui(config, role)
     : await launchHeadless(config, role, peerName || ip);
 
-  // 防火墙未放行时随结果给出警告（服务端缺入站 TCP 24800 时对端连不上——"连接成功"但键鼠不通）
-  let warning = null;
+  // 启动后随结果回传的自检警告，按"最容易踩坑"的顺序排列
+  const warnings = [];
+
+  // 1) 提权：Windows 下未提权无法注入键盘鼠标，是"连上了但光标不动"的第一嫌疑
+  if (isElevated() === false) {
+    warnings.push('当前 DSH 未以管理员权限运行：Windows 下这类进程无法注入键盘鼠标，常见表现是切过去后光标卡在屏幕边缘被弹回——请右键「以管理员身份运行」重启 DSH');
+  }
+
+  // 2) 多实例：旧实例没清干净会让同名客户端互踢，表现为切屏抖动、偶发断线
+  for (const w of instanceWarnings(launched?.instanceCheck)) warnings.push(w);
+
+  // 3) 防火墙：服务端缺入站 TCP 24800 时对端连不上——"连接成功"但键鼠不通
   {
     const fw = firewallState() || (checkFirewall(), firewallState());
     if (fw && !fw.allOk) {
       const missing = FW_RULES.filter((r) => !fw.rules[r.name]).map((r) => `${r.proto} ${r.port}`).join(' / ');
-      warning = `防火墙未放行 ${missing}，对端可能无法连接（可在面板点「一键放行」）`;
+      warnings.push(`防火墙未放行 ${missing}，对端可能无法连接（可在面板点「一键放行」）`);
     }
   }
+
   return {
     ok: launched.ok,
     role,
@@ -572,7 +645,9 @@ async function connect(args, config) {
     mode: launchMode(config),
     confPath: file,
     deskflow: launched,
-    warning,
+    elevated: isElevated(),
+    warning: warnings[0] || null,
+    warnings,
     message: launched.ok
       ? (role === 'server'
         ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(config)}）`
@@ -643,6 +718,8 @@ export function apply(ctx, config) {
                   deskflowPid: deskflowChild?.pid || null,
                   deskflowPath: coreExePath(pluginConfig),
                   backendReady: fs.existsSync(coreExePath(pluginConfig)),
+                  elevated: isElevated(),
+                  coreInstances: (listImagePids('deskflow-core.exe') || []).length,
                   firewall: firewallState(),
                   confPath: confPath(),
                   port: corePort,
@@ -679,10 +756,50 @@ export function apply(ctx, config) {
               if (r?.ok) return reply({ ok: true, value: r });
               return reply({ ok: false, error: { code: 'connect-failed', message: r?.message || '连接失败', details: {} } });
             }
+            case 'diagnose': {
+              // 一键自检：把"连上了但键鼠不动"的两大本地成因（未提权 / 多实例）当场查清楚
+              const corePids = listImagePids('deskflow-core.exe');
+              const guiPids = listImagePids('deskflow.exe');
+              const coreCount = corePids === null ? null : corePids.length;
+              const guiCount = guiPids === null ? null : guiPids.length;
+              const issues = [];
+              if (isElevated() === false) issues.push('未以管理员运行：无法注入键鼠，客户端光标会卡在屏幕边缘');
+              if (coreCount !== null && coreCount > 1) issues.push(`本机有 ${coreCount} 个 deskflow-core.exe 实例，同名客户端会互踢（PID ${corePids.join(', ')}）`);
+              if (guiCount !== null && guiCount > 1) issues.push(`本机有 ${guiCount} 个 deskflow.exe 实例（PID ${guiPids.join(', ')}）`);
+              const fw = firewallState();
+              if (fw && !fw.allOk) issues.push('防火墙未放行 24800，对端可能连不上');
+              return reply({
+                ok: true,
+                value: {
+                  healthy: issues.length === 0,
+                  issues,
+                  elevated: isElevated(),
+                  platform: process.platform,
+                  corePids: corePids || [],
+                  guiPids: guiPids || [],
+                  coreMode: readCoreMode(),
+                  coreRunning: !!deskflowChild,
+                  port: corePort,
+                  firewall: fw,
+                },
+              });
+            }
             case 'stop': {
               const killed = killDeskflowChild();
+              // 顺带清掉脱离句柄的孤儿实例，否则"停止"后再连接会出现两个同名客户端
+              const cleanup = process.platform === 'win32' ? cleanupInstances('deskflow-core.exe') : null;
               try { patchConf({ core: { coreMode: 0 } }); } catch { /* ignore */ }
-              return reply({ ok: true, value: { stopped: true, killedProcess: killed, message: killed ? '已停止本机管理的 Deskflow 进程' : '没有由插件启动的 Deskflow 进程' } });
+              return reply({
+                ok: true,
+                value: {
+                  stopped: true,
+                  killedProcess: killed,
+                  cleanup,
+                  message: killed || cleanup?.before
+                    ? `已停止 Deskflow（清理残留实例 ${cleanup?.before || 0} 个）`
+                    : '没有由插件启动的 Deskflow 进程',
+                },
+              });
             }
             default:
               return reply({ ok: false, error: { code: 'unknown-method', message: `Unknown method: ${method}`, details: {} } });
@@ -744,14 +861,50 @@ export function apply(ctx, config) {
   });
 
   ctx.tools.register({
+    name: 'deskflow_doctor',
+    description: '自检键鼠共享环境：检查当前进程是否以管理员运行（Windows 未提权会导致键鼠无法注入、光标卡在屏幕边缘）、本机是否有多个 deskflow 实例（同名客户端互踢会导致切屏抖动和偶发断线）、防火墙 24800 是否放行。出现"连接成功但鼠标不动"时先跑这个。',
+    parameters: { type: 'object', properties: {} },
+    output: { schema: { type: 'object' }, render: renderJson },
+    async execute() {
+      const corePids = listImagePids('deskflow-core.exe');
+      const guiPids = listImagePids('deskflow.exe');
+      const issues = [];
+      if (isElevated() === false) issues.push('未以管理员运行：无法注入键鼠，客户端光标会卡在屏幕边缘');
+      if ((corePids || []).length > 1) issues.push(`本机有 ${corePids.length} 个 deskflow-core.exe 实例，同名客户端会互踢`);
+      if ((guiPids || []).length > 1) issues.push(`本机有 ${guiPids.length} 个 deskflow.exe 实例`);
+      const fw = firewallState();
+      if (fw && !fw.allOk) issues.push('防火墙未放行 24800，对端可能连不上');
+      return {
+        healthy: issues.length === 0,
+        issues,
+        elevated: isElevated(),
+        platform: process.platform,
+        corePids: corePids || [],
+        guiPids: guiPids || [],
+        coreRunning: !!deskflowChild,
+        coreMode: readCoreMode(),
+        firewall: fw,
+      };
+    },
+  });
+
+  ctx.tools.register({
     name: 'deskflow_disconnect',
-    description: '断开键鼠共享：停止插件启动的 Deskflow 进程并把角色置回未连接。',
+    description: '断开键鼠共享：停止插件启动的 Deskflow 进程、清理残留孤儿实例，并把角色置回未连接。',
     parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'object' }, render: renderJson },
     async execute() {
       const killed = killDeskflowChild();
+      const cleanup = process.platform === 'win32' ? cleanupInstances('deskflow-core.exe') : null;
       try { patchConf({ core: { coreMode: 0 } }); } catch { /* ignore */ }
-      return { stopped: true, killedProcess: killed, message: killed ? '已停止 Deskflow' : '没有由插件启动的 Deskflow 进程' };
+      return {
+        stopped: true,
+        killedProcess: killed,
+        cleanup,
+        message: killed || cleanup?.before
+          ? `已停止 Deskflow（清理残留实例 ${cleanup?.before || 0} 个）`
+          : '没有由插件启动的 Deskflow 进程',
+      };
     },
   });
 }
