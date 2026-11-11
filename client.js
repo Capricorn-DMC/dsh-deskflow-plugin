@@ -232,21 +232,21 @@
         // 头部
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 } },
           h('div', { style: { fontSize: 16, fontWeight: 600, flex: 1 } }, '键鼠共享'),
-          h('span', { style: { ...s.badge, ...(discoveryOn && status?.discovering ? s.badgeOk : s.badgeErr) } },
-            discoveryOn ? (status?.discovering ? '● 发现服务：广播中' : '● 发现服务：重试中') : '● 发现服务：已关闭'),
-          h('span', { style: { ...s.badge, ...(status?.deskflowRunning ? s.badgeOk : s.badgeErr) } },
-            status?.deskflowRunning ? '● 核心：运行中' : '● 核心：未启动'),
+          h('span', { style: { ...s.badge, ...(status ? s.badgeOk : s.badgeErr) } },
+            status ? '● 已启动' : '● 未连接'),
           h('button', { onClick: () => setPanelOpen(false), style: { ...s.btnSecondary, border: 'none', background: 'transparent', color: T.text3, padding: '2px 6px' } }, '✕'),
         ),
 
         msg ? h('div', { style: msg.type === 'ok' ? s.msgOk : s.msgErr }, msg.text) : null,
+        // 发现服务异常（如端口被占用）时才提示，自动重试中
+        status?.discoveryError ? h('div', { style: s.msgErr }, `发现服务异常：${status.discoveryError}（自动重试中）`) : null,
 
         // 当前连接状态
         status ? h('div', { style: { ...s.peerCard, display: 'flex', alignItems: 'center', gap: 8 } },
           h('div', { style: { flex: 1 } },
             h('div', { style: { fontSize: 12, fontWeight: 600 } }, `本机角色：${CORE_MODE_NAMES[status.coreMode] || '未知'}`),
             h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
-              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '核心未启动（点「启动服务端」或下方角色按钮）')),
+              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '空闲（点下方按钮启动）')),
           connected && !busy
             ? h('button', { onClick: doDisconnect, disabled: busy, style: s.btnDanger }, '断开')
             : !busy
