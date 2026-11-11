@@ -72,6 +72,7 @@ let restartTimer = null;
 let deskflowChild = null;
 let corePort = DEFAULT_CORE_PORT;
 let discoveryEnabled = true; // 自动发现开关（RPC discovery 控制广播与记录）
+let discoveryError = null;   // 发现 socket 绑定失败原因（如端口被旧 DSH 实例占用）
 
 // ─── UDP 发现（复刻 C++ LanDiscovery 协议）──────────────────────────────────
 function broadcastTargets() {
@@ -132,12 +133,14 @@ function startDiscovery(config) {
       lastSeen: Date.now(),
     });
   });
-  sock.on('error', () => {
-    // 绑定失败（端口被独占）等情况：10s 后重试
+  sock.on('error', (e) => {
+    // 绑定失败（端口被独占）等情况：记录原因（status 暴露给面板）+ 10s 后重试
+    discoveryError = String(e && e.message || e);
     stopDiscovery();
-    restartTimer = setTimeout(() => { if (discoveryEnabled) { try { startDiscovery(config); } catch { /* 保持静默 */ } } }, 10000);
+    restartTimer = setTimeout(() => { if (discoveryEnabled) { try { startDiscovery(config); } catch (err) { discoveryError = String(err && err.message || err); } } }, 10000);
   });
   sock.bind(DISCOVERY_PORT, () => {
+    discoveryError = null; // 绑定成功，清除历史错误
     try { sock.setBroadcast(true); } catch { /* 部分平台默认已允许 */ }
   });
   announceTimer = setInterval(() => announce(false), ANNOUNCE_INTERVAL_MS);
@@ -166,7 +169,7 @@ function setDiscovery(on, config) {
     if (!pruneTimer) pruneTimer = setInterval(prunePeers, 2000);
     announce(false);
   } else {
-    try { startDiscovery(config); } catch { /* 保持静默 */ }
+    try { startDiscovery(config); } catch (e) { discoveryError = String(e && e.message || e); }
   }
   return discoveryEnabled;
 }
@@ -508,6 +511,7 @@ export function apply(ctx, config) {
                   version: PLUGIN_VERSION,
                   discovering: !!socket,
                   discoveryEnabled,
+                  discoveryError,
                   peerCount: peerList().length,
                   coreMode: readCoreMode(),
                   deskflowRunning: !!deskflowChild,

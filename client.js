@@ -114,14 +114,17 @@
       const [manualIp, setManualIp] = React.useState('');
       const seenRef = React.useRef(null);
       const firstPollRef = React.useRef(true);
-      // 自动发现开关初始态从 status.discoveryEnabled 同步（status 为空时默认开启）
-      const discoveryOn = status ? status.discoveryEnabled !== false : true;
+      // 自动发现开关：本地乐观状态（点击立即翻转），refresh 拿到 host 真实态后归位
+      const [discOverride, setDiscOverride] = React.useState(null);
+      const discoveryOn = discOverride !== null
+        ? discOverride
+        : (status ? status.discoveryEnabled !== false : true);
 
       const refresh = React.useCallback(async () => {
         const res = await hostCall('peers');
         const list = (res?.ok && res?.result?.peers) || [];
         const st = await hostCall('status');
-        if (st?.ok && st?.result) setStatus(st.result);
+        if (st?.ok && st?.result) { setStatus(st.result); setDiscOverride(null); }
         setPeers(list);
 
         // 首轮只建立基线，之后发现新设备 → 弹协商窗
@@ -175,12 +178,14 @@
       };
 
       const doToggleDiscovery = async () => {
+        if (busy) return;
         setBusy(true);
         setMsg(null);
+        setDiscOverride(!discoveryOn); // 乐观翻转，立即反映在按钮上
         const res = await hostCall('discovery', { enabled: !discoveryOn });
         setBusy(false);
         if (res?.ok) { setMsg({ type: 'ok', text: discoveryOn ? '已关闭自动发现' : '已开启自动发现' }); refresh(); }
-        else setMsg({ type: 'err', text: res?.error?.message || '操作失败' });
+        else { setDiscOverride(null); setMsg({ type: 'err', text: res?.error?.message || '操作失败' }); }
       };
 
       const doConnectIp = async (role) => {
