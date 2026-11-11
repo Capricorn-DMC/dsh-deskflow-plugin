@@ -27,6 +27,7 @@ const ANNOUNCE_INTERVAL_MS = 1500;
 const PEER_TIMEOUT_MS = 6000;
 const DISCOVERY_PROTO = 'deepseek-harness';
 
+const LOCAL_BACKEND_DIR = path.join(PLUGIN_DIR, 'backend');
 const DEFAULT_BACKEND_DIR = `${os.homedir()}/.dsh/deskflow-backend`;
 const DEFAULT_CORE_PORT = 24800;
 
@@ -41,51 +42,14 @@ function serverConfPath() {
 }
 
 function backendDir(config) {
+  // 优先用插件自带的 backend/ 目录（clone 即用，无需解压）；缺失时回退配置目录
+  if (fs.existsSync(path.join(LOCAL_BACKEND_DIR, 'deskflow-core.exe'))) return LOCAL_BACKEND_DIR;
   return (typeof config?.backendDir === 'string' && config.backendDir) || DEFAULT_BACKEND_DIR;
 }
 
 function coreExePath(config) {
   return path.join(backendDir(config), 'deskflow-core.exe');
 }
-
-// 首次使用自动解压后端包：插件目录内的 deskflow-backend-win64.zip → ~/.dsh/deskflow-backend/
-function ensureBackend(config) {
-  const exe = coreExePath(config);
-  if (fs.existsSync(exe)) return { ok: true, path: exe };
-  const zip = path.join(PLUGIN_DIR, 'deskflow-backend-win64.zip');
-  if (!fs.existsSync(zip)) {
-    return { ok: false, message: `未找到后端：${exe}，且插件目录内没有 deskflow-backend-win64.zip（可在插件配置 backendDir 中指定）` };
-  }
-  const dir = backendDir(config);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const r = spawnSync('powershell.exe', [
-      '-NoProfile', '-Command',
-      `Expand-Archive -LiteralPath "${zip}" -DestinationPath "${dir}" -Force`,
-    ], { timeout: 180000, windowsHide: true });
-    if (r.status !== 0 && !fs.existsSync(exe)) {
-      return { ok: false, message: `后端自动解压失败（exit ${r.status}）：请手动解压 ${zip} 到 ${dir}` };
-    }
-  } catch (e) {
-    return { ok: false, message: `后端自动解压异常：${e.message}（请手动解压 ${zip} 到 ${dir}）` };
-  }
-  // 兼容 zip 内含顶层目录（如 deskflow-backend/）的情况：把内容上移一级
-  if (!fs.existsSync(exe)) {
-    const inner = path.join(dir, 'deskflow-backend');
-    if (fs.existsSync(path.join(inner, 'deskflow-core.exe'))) {
-      for (const name of fs.readdirSync(inner)) {
-        fs.renameSync(path.join(inner, name), path.join(dir, name));
-      }
-      try { fs.rmdirSync(inner); } catch { /* 非空则保留 */ }
-    }
-  }
-  if (!fs.existsSync(exe)) {
-    return { ok: false, message: `解压完成但未找到 deskflow-core.exe：请检查 ${zip} 内容结构` };
-  }
-  return { ok: true, path: exe };
-}
-
-export { ensureBackend }; // 供独立测试与上层调用
 
 function guiExePath(config) {
   return path.join(backendDir(config), 'deskflow.exe');
@@ -104,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.2.1';
+const PLUGIN_VERSION = '1.2.2';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -434,10 +398,8 @@ function killDeskflowChild() {
 }
 
 async function launchProcess(config, exe, args, label, { killImage = null } = {}) {
-  // 后端缺失时先尝试从插件目录内的 zip 自动解压
   if (!fs.existsSync(exe)) {
-    const ensured = ensureBackend(config);
-    if (!ensured.ok) return { ok: false, message: ensured.message };
+    return { ok: false, message: `未找到后端：${exe}（插件自带 backend/ 目录缺失，可在插件配置 backendDir 中指定）` };
   }
   if (deskflowChild) {
     killDeskflowChild();

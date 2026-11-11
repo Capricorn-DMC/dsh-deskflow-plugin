@@ -18,27 +18,18 @@
 ## 环境要求
 
 - DeepSeek Harness 桌面客户端（DSH 0.2.1+，支持 `~/.dsh/profiles/desktop` 外部插件）
-- Deskflow 后端：`deskflow-core.exe` + DLL，默认放在 `~/.dsh/deskflow-backend/`（与官方安装版无关，卸载官方 Deskflow 不影响本插件）
+- Deskflow 后端：插件仓库自带 `backend/` 目录（`deskflow-core.exe` + 全部依赖 DLL），clone 即用，**无需安装 Qt/OpenSSL/VC++ 运行库**（与官方安装版无关，卸载官方 Deskflow 不影响本插件）
 - Windows（配置写入逻辑依赖 `%APPDATA%` 路径与 QSettings ini 格式）
 
 ## 安装
 
-### 第 1 步：clone 仓库（后端无需手动解压）
-
-仓库内已附带后端压缩包 **`deskflow-backend-win64.zip`**（Windows x64，含 `deskflow-core.exe` 及全部运行时 DLL）。
+### 第 1 步：clone 仓库（后端已附带，无需解压）
 
 ```powershell
 git clone https://github.com/Capricorn-DMC/dsh-deskflow-plugin.git
 ```
 
-**首次启动核心时会自动解压**：插件检测到 `~/.dsh/deskflow-backend/deskflow-core.exe` 缺失时，会自动把仓库内的 zip 解压到该目录（约需十几秒）。
-
-如果想提前手动解压（可选）：
-
-```powershell
-Expand-Archive -Path .\dsh-deskflow-plugin\deskflow-backend-win64.zip `
-  -DestinationPath "$env:USERPROFILE\.dsh\deskflow-backend"
-```
+仓库内 `backend/` 目录即后端本体（Windows x64：`deskflow-core.exe` + Qt6 DLL + OpenSSL 3 + VC++ 运行时），插件启动时优先使用该目录；如需放到别处，可配置 `backendDir` 指向含 `deskflow-core.exe` 的目录（如旧版的 `~/.dsh/deskflow-backend/`）。
 
 ### 第 2 步：注册插件到 DSH profile
 
@@ -86,7 +77,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `backendDir` | `~/.dsh/deskflow-backend` | 后端目录（含 `deskflow-core.exe` / `deskflow.exe`） |
+| `backendDir` | 插件自带 `backend/` | 后端目录（含 `deskflow-core.exe` / `deskflow.exe`），默认用仓库内 `backend/`，可指向其他位置 |
 | `launchMode` | `headless` | `headless`=后台核心无窗口；`gui`=拉起 Deskflow 窗口 |
 | `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom） |
 | `port` | `24800` | 本机 Deskflow core 端口（随发现广播一起声明） |
@@ -121,7 +112,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 
 ## 已知限制
 
-- 后端包 `deskflow-backend-win64.zip` 自带全部运行依赖：deskflow-core/deskflow/deskflow-daemon + Qt6 DLL/插件 + OpenSSL 3（`libssl-3-x64.dll`、`libcrypto-3-x64.dll`）+ VC++ 运行时（VCRUNTIME140/MSVCP140 等），解压到 `~/.dsh/deskflow-backend` 即可运行，**无需单独安装 Qt/OpenSSL/VC++ 运行库**（首次使用自动解压）
+- 后端直接随仓库附带（`backend/` 目录）：deskflow-core/deskflow/deskflow-daemon + Qt6 DLL/插件 + OpenSSL 3（`libssl-3-x64.dll`、`libcrypto-3-x64.dll`）+ VC++ 运行时（VCRUNTIME140/MSVCP140 等），clone 即用，**无需单独安装 Qt/OpenSSL/VC++ 运行库**
 - headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
 - 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
 - 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core

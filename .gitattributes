@@ -1,0 +1,2 @@
+# 后端二进制文件（exe/dll/qm）禁止任何换行转换
+backend/** -text
