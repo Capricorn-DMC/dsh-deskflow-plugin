@@ -188,6 +188,20 @@
         else { setDiscOverride(null); setMsg({ type: 'err', text: res?.error?.message || '操作失败' }); }
       };
 
+      // 显式启动服务端：优先用已发现的对端（含其主机名，供服务端屏幕名单匹配），否则用手动 IP
+      const doStartServer = async () => {
+        if (busy) return;
+        const target = peers[0]
+          ? { peer: { name: peers[0].name, ip: peers[0].ip } }
+          : (manualIp.trim() ? { ip: manualIp.trim() } : null);
+        if (!target) { setMsg({ type: 'err', text: '启动服务端需要指定对端：等待发现设备出现，或在下方填写对端 IP' }); return; }
+        setBusy(true); setMsg(null);
+        const res = await hostCall('connect', { role: 'server', ...target });
+        setBusy(false);
+        if (res?.ok) { setMsg({ type: 'ok', text: '服务端已启动，等待对端客户端接入' }); refresh(); }
+        else setMsg({ type: 'err', text: res?.error?.message || '启动失败' });
+      };
+
       const doConnectIp = async (role) => {
         const ip = manualIp.trim();
         if (!ip) { setMsg({ type: 'err', text: '请先输入对端 IP' }); return; }
@@ -218,8 +232,10 @@
         // 头部
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 } },
           h('div', { style: { fontSize: 16, fontWeight: 600, flex: 1 } }, '键鼠共享'),
-          h('span', { style: { ...s.badge, ...(status?.discovering && discoveryOn ? s.badgeOk : s.badgeErr) } },
-            discoveryOn ? (status?.discovering ? '● 发现中' : '● 待连接（连接后自动启动）') : '● 已关闭'),
+          h('span', { style: { ...s.badge, ...(discoveryOn && status?.discovering ? s.badgeOk : s.badgeErr) } },
+            discoveryOn ? (status?.discovering ? '● 发现服务：广播中' : '● 发现服务：重试中') : '● 发现服务：已关闭'),
+          h('span', { style: { ...s.badge, ...(status?.deskflowRunning ? s.badgeOk : s.badgeErr) } },
+            status?.deskflowRunning ? '● 核心：运行中' : '● 核心：未启动'),
           h('button', { onClick: () => setPanelOpen(false), style: { ...s.btnSecondary, border: 'none', background: 'transparent', color: T.text3, padding: '2px 6px' } }, '✕'),
         ),
 
@@ -230,10 +246,12 @@
           h('div', { style: { flex: 1 } },
             h('div', { style: { fontSize: 12, fontWeight: 600 } }, `本机角色：${CORE_MODE_NAMES[status.coreMode] || '未知'}`),
             h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
-              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '待连接（选择角色后自动启动）')),
+              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '核心未启动（点「启动服务端」或下方角色按钮）')),
           connected && !busy
             ? h('button', { onClick: doDisconnect, disabled: busy, style: s.btnDanger }, '断开')
-            : null,
+            : !busy
+              ? h('button', { onClick: doStartServer, style: s.btnPrimary }, '启动服务端')
+              : null,
         ) : null,
 
         // 自动发现开关
