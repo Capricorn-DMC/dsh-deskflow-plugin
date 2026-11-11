@@ -11,14 +11,14 @@
 - **角色协商弹窗**：发现新设备自动弹窗，二选一：
   - 本机作为**服务端** —— 用本机键鼠控制对方
   - 本机作为**客户端** —— 使用对方键鼠控制本机
-- **自动连接**：写 Deskflow QSettings 配置（coreMode / remoteHost / startCoreWithGui，服务端自动登记对端屏幕）后自动拉起 deskflow.exe
+- **自动连接（headless 无窗口）**：写 Deskflow QSettings 配置后直接拉起后台核心 `deskflow-core.exe`（服务端自动登记屏幕与边缘切换链接），全程无 Deskflow 窗口，交互都在插件面板完成
 - **AI 工具**：向 DSH 注册 4 个可被智能体调用的工具
   - `deskflow_status` / `deskflow_scan_peers` / `deskflow_connect` / `deskflow_disconnect`
 
 ## 环境要求
 
 - DeepSeek Harness 桌面客户端（DSH 0.2.1+，支持 `~/.dsh/profiles/desktop` 外部插件）
-- Deskflow 可执行程序（本插件默认指向自编译 fork 版 `deskflow.exe`，路径可配置）
+- Deskflow 后端：`deskflow-core.exe` + DLL，默认放在 `~/.dsh/deskflow-backend/`（与官方安装版无关，卸载官方 Deskflow 不影响本插件）
 - Windows（配置写入逻辑依赖 `%APPDATA%` 路径与 QSettings ini 格式）
 
 ## 安装
@@ -60,7 +60,9 @@ New-Item -ItemType Junction `
 
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `deskflowPath` | `DeepSeekHarness-build/deskflow.exe` | Deskflow 可执行文件路径 |
+| `backendDir` | `~/.dsh/deskflow-backend` | 后端目录（含 `deskflow-core.exe` / `deskflow.exe`） |
+| `launchMode` | `headless` | `headless`=后台核心无窗口；`gui`=拉起 Deskflow 窗口 |
+| `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom） |
 | `port` | `24800` | 本机 Deskflow core 端口（随发现广播一起声明） |
 
 ## 工作原理
@@ -71,20 +73,23 @@ New-Item -ItemType Junction `
 │   └ sidebar.footer.action 按钮/面板   │      │                       │
 │       └ RPC /api/deskflow             │◄────►│  UDP 40801 广播互相   │
 │           └ Host (index.js)           │ RPC  │  发现，协商角色后     │
-│               ├ dgram UDP 40801 发现  │      │  各自启动 Deskflow    │
-│               ├ 写 DeepSeek Harness   │      │  core (24800 TCP)     │
+│               ├ dgram UDP 40801 发现  │      │  各自启动后台 core    │
+│               ├ 写 DeepSeek Harness   │      │  (24800 TCP)          │
 │               │   .conf（QSettings）  │      │                       │
-│               └ spawn deskflow.exe    │      │                       │
+│               └ spawn deskflow-core   │      │                       │
+│                   （headless 无窗口） │      │                       │
 └───────────────────────────────────────┘      └───────────────────────┘
 ```
 
 - 发现协议：UDP 广播 JSON `{proto:"deepseek-harness", ver:1, instance:<uuid>, name, port, leaving}`，与 Deskflow fork 的 C++ `LanDiscovery` 一致，可互操作
-- 连接动作 = 修改 `%APPDATA%\DeepSeek Harness\DeepSeek Harness.conf`（`core/coreMode`、`client/remoteHost`、`gui/startCoreWithGui`、服务端 `[internalConfig] screens` 登记对端）+ 启动 deskflow.exe，Deskflow 原有全部功能不受影响
+- 连接动作 = 修改 `%APPDATA%\DeepSeek Harness\DeepSeek Harness.conf`（`core/coreMode`、`client/remoteHost`、`security/tlsEnabled=false`，服务端额外写 `[computer_N]` 屏幕分组 + `deskflow-server.conf` 边缘切换链接）+ 后台启动 `deskflow-core.exe server|client -s <conf>`，Deskflow 原有全部功能不受影响
+- 屏幕名 = 计算机主机名（与 core 默认自命名一致）；screens 存于通用配置 `[computer_N]` 分组，server config 文件只承载 links/options（本版本 Deskflow 行为）
 
 ## 已知限制
 
-- Deskflow fork 版 GUI 内置的 C++ 发现弹窗与本插件并存，可能各弹一次协商窗（不影响功能）
-- 服务端屏幕登记只写 `name`，其余屏幕选项（修饰键映射、切换角等）走 Deskflow 默认值
+- headless 模式统一关闭 TLS（`security/tlsEnabled=false`，插件无证书生成能力），LAN 内明文传输，与 Deskflow fork 互操作时对端也需关闭
+- 若对端曾用 Deskflow GUI 改过计算机名（`core/computerName`），屏幕名与发现广播的 hostname 不一致会连接失败；默认两边都用主机名即可
+- 启动前会 `taskkill` 同名旧进程（孤儿实例清理），同机只能运行一个 core
 
 ## License
 

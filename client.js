@@ -193,7 +193,7 @@
           h('div', { style: { flex: 1 } },
             h('div', { style: { fontSize: 12, fontWeight: 600 } }, `本机角色：${CORE_MODE_NAMES[status.coreMode] || '未知'}`),
             h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
-              status.deskflowRunning ? `Deskflow 运行中（PID ${status.deskflowPid}）` : 'Deskflow 未运行')),
+              status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '后台核心未运行')),
           connected && !busy
             ? h('button', { onClick: doDisconnect, disabled: busy, style: s.btnDanger }, '断开')
             : null,
@@ -214,7 +214,7 @@
                 h('button', { onClick: () => doConnect('client', p), disabled: busy, style: s.btnSecondary, title: '本机作为客户端：使用对方键鼠' }, '客户端'),
               ))),
 
-        h('p', { style: s.note }, '选择"服务端"= 用本机键鼠控制对方；"客户端"= 使用对方键鼠。连接会写入 Deskflow 配置并自动启动。'),
+        h('p', { style: s.note }, '选择"服务端"= 用本机键鼠控制对方；"客户端"= 使用对方键鼠。连接后在后台无窗口运行。'),
       ) : null;
 
       const modal = modalPeer

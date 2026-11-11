@@ -13,7 +13,7 @@ import dgram from 'dgram';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { randomUUID } from 'crypto';
 
 export const inject = ['tools', 'connection'];
@@ -24,12 +24,38 @@ const ANNOUNCE_INTERVAL_MS = 1500;
 const PEER_TIMEOUT_MS = 6000;
 const DISCOVERY_PROTO = 'deepseek-harness';
 
-const DEFAULT_DESKFLOW_EXE = 'C:/Users/RJ21/Documents/Trae-CN/temp_20261109_01/DeepSeekHarness-build/deskflow.exe';
+const DEFAULT_BACKEND_DIR = `${os.homedir()}/.dsh/deskflow-backend`;
 const DEFAULT_CORE_PORT = 24800;
 
 function confPath() {
   return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),
     'DeepSeek Harness', 'DeepSeek Harness.conf');
+}
+
+// 服务端配置文件（synergy 格式），与 QSettings conf 同目录
+function serverConfPath() {
+  return path.join(path.dirname(confPath()), 'deskflow-server.conf');
+}
+
+function backendDir(config) {
+  return (typeof config?.backendDir === 'string' && config.backendDir) || DEFAULT_BACKEND_DIR;
+}
+
+function coreExePath(config) {
+  return path.join(backendDir(config), 'deskflow-core.exe');
+}
+
+function guiExePath(config) {
+  return path.join(backendDir(config), 'deskflow.exe');
+}
+
+function launchMode(config) {
+  return config?.launchMode === 'gui' ? 'gui' : 'headless';
+}
+
+// 对端屏幕相对本机服务端屏幕的方向
+function layoutDir(config) {
+  return ['right', 'left', 'top', 'bottom'].includes(config?.layout) ? config.layout : 'right';
 }
 
 // ─── 发现状态（模块级，随 DSH host 进程存续）─────────────────────────────────
@@ -167,8 +193,10 @@ function patchConf(updates) {
   return file;
 }
 
-// 服务端角色：把对端屏幕名加进 [internalConfig] screens 数组。
-// Computer::loadSettings 只读 name，其余键走默认值，因此只需占一个空位（或扩容）。
+// 服务端角色：登记屏幕。core 的 Config::read 从通用配置的 [computer_N] 分组读取已知屏幕
+// （Settings::knownComputers），server config 文件的 links 只能引用这里出现过的名字。
+// 同时更新 [internalConfig] screens 网格（fork GUI 兼容）。
+// Computer::loadSettings 只读 name，其余键走默认值。
 function addServerScreen(peerName) {
   if (!peerName) return false;
   const file = confPath();
@@ -178,7 +206,7 @@ function addServerScreen(peerName) {
   const body = hadBom ? text.slice(1) : text;
   const lines = body.split(/\r?\n/);
 
-  // 逐段解析 internalConfig
+  // 1) internalConfig 网格：对端占一个空位（或扩容），保持 GUI 兼容
   let inSection = false;
   let size = 0;
   const names = new Map(); // index -> line number
@@ -192,28 +220,56 @@ function addServerScreen(peerName) {
     const nmM = lines[i].match(/^\s*screens\\(\d+)\\name\s*=(.*)$/);
     if (nmM) names.set(parseInt(nmM[1], 10), i);
   }
-  if (size <= 0 || sizeLine < 0) return false;
-
-  // 已存在同名屏幕则跳过
-  for (const [, lineIdx] of names) {
-    const m = lines[lineIdx].match(/=(.*)$/);
-    if (m && m[1].trim() === peerName) return true;
+  if (size > 0 && sizeLine >= 0) {
+    let done = false;
+    // 已存在同名屏幕则跳过
+    for (const [, lineIdx] of names) {
+      const m = lines[lineIdx].match(/=(.*)$/);
+      if (m && m[1].trim() === peerName) { done = true; break; }
+    }
+    if (!done) {
+      // 找第一个空位
+      for (let i = 1; i <= size; i++) {
+        if (!names.has(i)) continue;
+        const m = lines[names.get(i)].match(/^(\s*screens\\\d+\\name\s*=)\s*$/);
+        if (m) {
+          lines[names.get(i)] = `${m[1]}${peerName}`;
+          done = true;
+          break;
+        }
+      }
+      // 无空位：扩容
+      if (!done) {
+        lines[sizeLine] = `screens\\size=${size + 1}`;
+        lines.splice(sizeLine + 1, 0, `screens\\${size + 1}\\name=${peerName}`);
+      }
+    }
+    writeConfFile(file, hadBom, lines);
   }
-  // 找第一个空位
-  for (let i = 1; i <= size; i++) {
-    if (!names.has(i)) continue;
-    const m = lines[names.get(i)].match(/^(\s*screens\\\d+\\name\s*=)\s*$/);
-    if (m) {
-      lines[names.get(i)] = `${m[1]}${peerName}`;
-      writeConfFile(file, hadBom, lines);
-      return true;
+
+  // 2) [computer_N] 分组：core 已知屏幕清单（服务端自身 + 对端）
+  const existing = new Map(); // N -> name
+  let section = '';
+  for (const line of lines) {
+    const secM = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (secM) { section = secM[1].trim(); continue; }
+    const cm = section.match(/^computer_(\d+)$/);
+    if (cm) {
+      const nmM = line.match(/^\s*name\s*=(.*)$/);
+      if (nmM) existing.set(parseInt(cm[1], 10), nmM[1].trim());
     }
   }
-  // 无空位：扩容
-  lines[sizeLine] = `screens\\size=${size + 1}`;
-  // 保持数组项顺序：size 行后面通常紧跟各项，直接把新项插到 size 行之后
-  lines.splice(sizeLine + 1, 0, `screens\\${size + 1}\\name=${peerName}`);
-  writeConfFile(file, hadBom, lines);
+  const wanted = [selfName, peerName].filter(Boolean);
+  const missing = wanted.filter((n) => ![...existing.values()].includes(n));
+  if (missing.length > 0) {
+    let next = existing.size > 0 ? Math.max(...existing.keys()) + 1 : 1;
+    const extra = [];
+    for (const name of missing) extra.push(`[computer_${next++}]`, `name=${name}`, '');
+    // 追加到文件末尾（保留最后一行换行）
+    const trimmed = [...lines];
+    while (trimmed.length && trimmed[trimmed.length - 1] === '') trimmed.pop();
+    fs.writeFileSync(file, (hadBom ? '\uFEFF' : '') + trimmed.join('\r\n') + '\r\n' + extra.join('\r\n'), 'utf8');
+  }
   return true;
 }
 
@@ -238,11 +294,7 @@ function readCoreMode() {
   return 0;
 }
 
-// ─── deskflow.exe 进程管理 ───────────────────────────────────────────────────
-function deskflowExe(config) {
-  return (typeof config?.deskflowPath === 'string' && config.deskflowPath) || DEFAULT_DESKFLOW_EXE;
-}
-
+// ─── 进程管理 ────────────────────────────────────────────────────────────────
 function killDeskflowChild() {
   if (deskflowChild) {
     try { deskflowChild.kill(); } catch { /* ignore */ }
@@ -252,28 +304,77 @@ function killDeskflowChild() {
   return false;
 }
 
-async function launchDeskflow(config) {
-  const exe = deskflowExe(config);
+async function launchProcess(config, exe, args, label, { killImage = null } = {}) {
   if (!fs.existsSync(exe)) {
-    return { ok: false, message: `未找到 deskflow.exe：${exe}（可在插件配置 deskflowPath 中指定）` };
+    return { ok: false, message: `未找到后端：${exe}（可在插件配置 backendDir 中指定）` };
   }
   if (deskflowChild) {
     killDeskflowChild();
-    await new Promise(r => setTimeout(r, 800)); // 等旧实例退出（GUI 有单实例锁）
+    await new Promise(r => setTimeout(r, 800));
+  }
+  // 清理孤儿实例（DSH 重启后 detached 进程脱离句柄；同机只应有一个 core/GUI 实例）
+  if (killImage && process.platform === 'win32') {
+    try {
+      execSync(`taskkill /F /IM ${killImage}`, { stdio: 'ignore', timeout: 5000 });
+      await new Promise(r => setTimeout(r, 500));
+    } catch { /* 没有旧实例则忽略 */ }
   }
   try {
-    // detached：GUI 独立于 DSH 生命周期，DSH 重启不影响键鼠共享
-    deskflowChild = spawn(exe, [], { detached: true, stdio: 'ignore' });
+    // detached：后台核心独立于 DSH 生命周期，DSH 重启不影响键鼠共享
+    deskflowChild = spawn(exe, args, { detached: true, stdio: 'ignore' });
     deskflowChild.on('exit', () => { deskflowChild = null; });
     deskflowChild.unref();
-    return { ok: true, pid: deskflowChild.pid, message: `Deskflow 已启动（PID ${deskflowChild.pid}）` };
+    return { ok: true, pid: deskflowChild.pid, message: `${label}已启动（PID ${deskflowChild.pid}，后台运行）` };
   } catch (e) {
     deskflowChild = null;
     return { ok: false, message: `启动失败：${e?.message || e}` };
   }
 }
 
-// ─── 连接动作：写 conf + 拉起 GUI ────────────────────────────────────────────
+// 服务端屏幕配置（synergy 格式，与 GUI operator<< 输出一致的结构）。
+// 屏幕名用 hostname（与 core 默认自命名一致），对端屏幕按 layout 方向链接。
+function writeServerConfig(config, clientName) {
+  const serverName = selfName;
+  const layout = layoutDir(config);
+  const opposite = { right: 'left', left: 'right', top: 'bottom', bottom: 'top' }[layout];
+  // 注意：本版本 screens 存放在通用配置（conf 的 [screens] 数组，见 addServerScreen），
+  // server config 文件只承载 links + options（与 GUI operator<< 输出一致）
+  const body =
+    `section: links\n` +
+    `\t${serverName}:\n` +
+    `\t\t${layout} = ${clientName}\n` +
+    `\t${clientName}:\n` +
+    `\t\t${opposite} = ${serverName}\n` +
+    `end\n\n` +
+    `section: options\n` +
+    `end\n\n`;
+  const file = serverConfPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, body, 'utf8');
+  return file;
+}
+
+// headless：直接拉起 deskflow-core 后台进程（无 GUI 窗口）
+async function launchHeadless(config, role, peerName) {
+  const exe = coreExePath(config);
+  const conf = confPath();
+  const args = ['-s', conf];
+  if (role === 'server') {
+    const serverConf = writeServerConfig(config, peerName);
+    patchConf({
+      server: { externalConfig: 'true', externalConfigFile: serverConf.replace(/\\/g, '/') },
+    });
+    return await launchProcess(config, exe, ['server', ...args], '键鼠共享服务端核心', { killImage: 'deskflow-core.exe' });
+  }
+  return await launchProcess(config, exe, ['client', ...args], '键鼠共享客户端核心', { killImage: 'deskflow-core.exe' });
+}
+
+// gui：拉起 Deskflow GUI 窗口（由 GUI 自行管理 core）
+async function launchGui(config, role) {
+  return await launchProcess(config, guiExePath(config), [], 'Deskflow 窗口', { killImage: 'deskflow.exe' });
+}
+
+// ─── 连接动作：写 conf + 拉起后端 ────────────────────────────────────────────
 async function connect(args, config) {
   const role = args?.role === 'client' ? 'client' : args?.role === 'server' ? 'server' : null;
   if (!role) return { ok: false, message: 'role 必须是 server 或 client' };
@@ -285,15 +386,9 @@ async function connect(args, config) {
   }
   if (role === 'client' && !ip) return { ok: false, message: 'client 角色需要指定对端（peerInstance 或 peerIp）' };
 
-  const updates = {
-    core: { coreMode: role === 'server' ? 2 : 1 },
-    gui: { startCoreWithGui: true },
-  };
-  if (role === 'client') updates.client = { remoteHost: ip };
-
+  let peerName = null;
   // 服务端角色：把对端屏幕名登记进 server config（对齐 C++ 版 applyLanRole 的 addClient）
   if (role === 'server') {
-    let peerName = null;
     if (typeof args?.peerInstance === 'string' && peers.get(args.peerInstance)) {
       peerName = peers.get(args.peerInstance).name;
     } else if (ip) {
@@ -302,21 +397,32 @@ async function connect(args, config) {
     try { addServerScreen(peerName || args?.peerName); } catch { /* 失败不阻断连接 */ }
   }
 
+  const updates = {
+    core: { coreMode: role === 'server' ? 2 : 1, computerName: selfName },
+    gui: { startCoreWithGui: true },
+    // headless 无证书生成能力，LAN 场景统一关闭 TLS（对端插件写入相同设置）
+    security: { tlsEnabled: 'false' },
+  };
+  if (role === 'client') updates.client = { remoteHost: ip };
+
   let file;
   try { file = patchConf(updates); } catch (e) {
     return { ok: false, message: `写入配置失败：${e?.message || e}` };
   }
-  const launched = await launchDeskflow(config);
+  const launched = launchMode(config) === 'gui'
+    ? await launchGui(config, role)
+    : await launchHeadless(config, role, peerName || ip);
   return {
     ok: launched.ok,
     role,
     peer: role === 'client' ? ip : '（所有客户端）',
+    mode: launchMode(config),
     confPath: file,
     deskflow: launched,
     message: launched.ok
       ? (role === 'server'
-        ? `本机作为服务端，共享键鼠；Deskflow 已启动`
-        : `本机作为客户端，连接 ${ip}；Deskflow 已启动`)
+        ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(config)}）`
+        : `本机作为客户端，连接 ${ip}；后台核心已启动`)
       : launched.message,
   };
 }
@@ -374,7 +480,8 @@ export function apply(ctx, config) {
                   coreMode: readCoreMode(),
                   deskflowRunning: !!deskflowChild,
                   deskflowPid: deskflowChild?.pid || null,
-                  deskflowPath: deskflowExe(pluginConfig),
+                  deskflowPath: coreExePath(pluginConfig),
+                  launchMode: launchMode(pluginConfig),
                   confPath: confPath(),
                   port: corePort,
                 },
@@ -421,7 +528,8 @@ export function apply(ctx, config) {
         coreModeName: { 0: '未连接', 1: '客户端', 2: '服务端' }[readCoreMode()] || '未知',
         deskflowRunning: !!deskflowChild,
         deskflowPid: deskflowChild?.pid || null,
-        deskflowPath: deskflowExe(pluginConfig),
+        deskflowPath: coreExePath(pluginConfig),
+        launchMode: launchMode(pluginConfig),
       };
     },
   });
