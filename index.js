@@ -61,6 +61,8 @@ function layoutDir(config) {
 // ─── 发现状态（模块级，随 DSH host 进程存续）─────────────────────────────────
 const instanceId = randomUUID();
 const selfName = os.hostname();
+// 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
+const PLUGIN_VERSION = '1.1.0';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -503,6 +505,7 @@ export function apply(ctx, config) {
                 result: {
                   instance: instanceId,
                   name: selfName,
+                  version: PLUGIN_VERSION,
                   discovering: !!socket,
                   discoveryEnabled,
                   peerCount: peerList().length,

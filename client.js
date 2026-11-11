@@ -11,6 +11,9 @@
     let ReactDOM = null;
     try { ReactDOM = require('react-dom'); } catch { /* 降级为非 portal 渲染 */ }
 
+    // UI 版本（与 package.json version 同步；面板底部显示 "UI vX / Host vY" 用于排查 host 未重载）
+    const UI_VERSION = '1.1.0';
+
     // 真实 cordis ctx 在 apply() 捕获；组件不通过 props 读它
     let realCtx = null;
 
@@ -211,7 +214,7 @@
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 } },
           h('div', { style: { fontSize: 16, fontWeight: 600, flex: 1 } }, '键鼠共享'),
           h('span', { style: { ...s.badge, ...(status?.discovering && discoveryOn ? s.badgeOk : s.badgeErr) } },
-            discoveryOn ? (status?.discovering ? '● 发现中' : '● 未运行') : '● 已关闭'),
+            discoveryOn ? (status?.discovering ? '● 发现中' : '● 待连接（连接后自动启动）') : '● 已关闭'),
           h('button', { onClick: () => setPanelOpen(false), style: { ...s.btnSecondary, border: 'none', background: 'transparent', color: T.text3, padding: '2px 6px' } }, '✕'),
         ),
 
@@ -275,6 +278,10 @@
         ),
 
         h('p', { style: s.note }, '选择"服务端"= 用本机键鼠控制对方；"客户端"= 使用对方键鼠。连接后在后台无窗口运行。'),
+
+        // 版本号（renderer 与 host 可能不同步，用于排查）
+        h('div', { style: { fontSize: 10, color: T.text3, textAlign: 'center', marginTop: 10 } },
+          `UI v${UI_VERSION} / Host v${status?.version || '?'}`),
       ) : null;
 
       const modal = modalPeer
