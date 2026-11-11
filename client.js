@@ -32,20 +32,24 @@
       error: 'var(--dsw-alias-state-error-primary)',
     };
     const FONT = 'var(--dsw-font-family, system-ui, sans-serif)';
+    // 毛玻璃主题下 bg-layer-* 常带透明度，直接做面板/卡片背景会让文字发虚看不清。
+    // rgb(from … / 1) 剥掉透明度转为不透明色（Chrome 119+）；
+    // 老内核不识别时该声明被忽略，自动退回 background 简写里的原变量值。
+    const opaque = (c) => `rgb(from ${c} r g b / 1)`;
 
     const s = {
       railBtn: { width: 36, height: 36, borderRadius: 8, border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.text2, padding: 0 },
       railBtnActive: { background: T.accentSoft, color: T.accent },
       wideBtn: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 10px', borderRadius: 8, border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 13, fontFamily: FONT, color: T.text2 },
-      panel: { position: 'fixed', left: 64, bottom: 12, width: 340, maxHeight: 520, overflowY: 'auto', background: T.bgLayer1, border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.25)', padding: 16, fontFamily: FONT, fontSize: 13, color: T.text, zIndex: 9999 },
+      panel: { position: 'fixed', left: 64, bottom: 12, width: 340, maxHeight: 520, overflowY: 'auto', background: T.bgLayer1, backgroundColor: opaque(T.bgLayer1), border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.25)', padding: 16, fontFamily: FONT, fontSize: 13, color: T.text, zIndex: 9999 },
       overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT },
-      modal: { width: 400, background: T.bgLayer1, border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 12px 48px rgba(0,0,0,0.35)', padding: 22, color: T.text },
+      modal: { width: 400, background: T.bgLayer1, backgroundColor: opaque(T.bgLayer1), border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 12px 48px rgba(0,0,0,0.35)', padding: 22, color: T.text },
       sectionTitle: { fontSize: 13, fontWeight: 600, margin: '0 0 8px 0', color: T.text, display: 'flex', alignItems: 'center', gap: 6 },
-      peerCard: { padding: 10, background: T.bgLayer2, borderRadius: 8, border: `1px solid ${T.borderL1}`, marginBottom: 8 },
+      peerCard: { padding: 10, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), borderRadius: 8, border: `1px solid ${T.borderL1}`, marginBottom: 8 },
       peerName: { fontSize: 13, fontWeight: 600, color: T.text },
       peerMeta: { fontSize: 11, color: T.text3, fontFamily: 'monospace', marginTop: 2 },
       btnPrimary: { padding: '6px 12px', borderRadius: 6, border: 'none', background: T.accent, color: '#fff', fontSize: 12, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' },
-      btnSecondary: { padding: '5px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, color: T.text, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' },
+      btnSecondary: { padding: '5px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' },
       btnDanger: { padding: '5px 10px', borderRadius: 6, border: `1px solid ${T.error}`, background: 'transparent', color: T.error, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' },
       badge: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 500 },
       badgeOk: { background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 15%, transparent)', color: T.success },
@@ -54,8 +58,8 @@
       msgErr: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)', color: T.error, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent)' },
       empty: { textAlign: 'center', padding: '18px 8px', color: T.text3, fontSize: 12, lineHeight: 1.6 },
       note: { fontSize: 11, color: T.text3, margin: '8px 0 0 0', lineHeight: 1.5 },
-      input: { width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, color: T.text, fontSize: 12, fontFamily: FONT, outline: 'none' },
-      toggle: { position: 'relative', width: 34, height: 19, borderRadius: 10, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, cursor: 'pointer', padding: 0, flexShrink: 0 },
+      input: { width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text, fontSize: 12, fontFamily: FONT, outline: 'none' },
+      toggle: { position: 'relative', width: 34, height: 19, borderRadius: 10, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), cursor: 'pointer', padding: 0, flexShrink: 0 },
       toggleOn: { background: T.accent, borderColor: T.accent },
       toggleKnob: { position: 'absolute', top: 1, left: 1, width: 15, height: 15, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.2)', transition: 'left 0.15s ease' },
       toggleKnobOn: { left: 16 },
@@ -276,7 +280,7 @@
         // 设备列表
         h('div', { style: { ...s.sectionTitle, marginTop: 14 } },
           h('span', null, '局域网设备'),
-          h('span', { style: { ...s.badge, background: T.bgLayer2, color: T.text3 } }, `${peers.length}`)),
+          h('span', { style: { ...s.badge, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text3 } }, `${peers.length}`)),
         !discoveryOn
           ? h('div', { style: s.empty }, '发现已关闭', h('br'), '打开上方「自动发现」开关以搜索局域网设备')
           : peers.length === 0
