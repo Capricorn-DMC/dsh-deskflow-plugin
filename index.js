@@ -103,6 +103,24 @@ function savePeersCache() {
 }
 
 // ─── UDP 发现（复刻 C++ LanDiscovery 协议）──────────────────────────────────
+// 本机 IPv4 集合（30s 缓存）：同机其它实例（不同 instanceId，如旧进程没退干净）广播时，
+// 源 IP 是本机地址，直接忽略——同一台机器不该出现在自己的设备列表里。
+let localIps = new Set();
+let localIpsAt = 0;
+function localIPv4s() {
+  const now = Date.now();
+  if (localIps.size && now - localIpsAt < 30000) return localIps;
+  const set = new Set(['127.0.0.1']);
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const it of list || []) {
+      if (it.family === 'IPv4') set.add(it.address);
+    }
+  }
+  localIps = set;
+  localIpsAt = now;
+  return set;
+}
+
 function broadcastTargets() {
   const targets = new Set(['255.255.255.255']);
   for (const list of Object.values(os.networkInterfaces())) {
@@ -159,8 +177,14 @@ function startDiscovery(config) {
     if (!msg || typeof msg !== 'object') return;
     if (msg.proto !== DISCOVERY_PROTO || typeof msg.instance !== 'string' || !msg.instance) return;
     if (msg.instance === instanceId) return; // 过滤自己（含 C++ 端共享端口场景）
+    if (localIPv4s().has(rinfo.address)) return; // 同机其它实例：源 IP 是本机地址，不是对端
     if (msg.leaving) { peers.delete(msg.instance); return; }
     if (!knownIps.has(rinfo.address)) { knownIps.add(rinfo.address); savePeersCache(); }
+    // 同一 IP 只保留一条记录：对端起了多个 DSH 实例（各自 instanceId 不同）时，
+    // 不在列表里重复出卡片，总是让最新广播的那条顶掉旧的
+    for (const [k, v] of peers) {
+      if (k !== msg.instance && v.ip === rinfo.address) peers.delete(k);
+    }
     peers.set(msg.instance, {
       instance: msg.instance,
       name: typeof msg.name === 'string' && msg.name ? msg.name : 'unknown',
