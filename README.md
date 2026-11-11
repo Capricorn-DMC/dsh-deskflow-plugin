@@ -69,9 +69,11 @@ New-Item -ItemType Junction `
 
 重启 DeepSeek Harness 客户端，侧栏底部出现「⌨ 键鼠共享」即安装成功。
 
-### 第 3 步：防火墙放行（两端都要）
+### 第 3 步：防火墙放行（两端都要，插件内一键完成）
 
-管理员 PowerShell：
+插件启动后自动检测防火墙规则（UDP 40801 发现 / TCP 24800 键鼠连接）。未放行时面板会出现黄色警示条，点**「一键放行（需管理员授权）」**，在系统 UAC 弹窗点「是」即可自动添加两条入站规则。
+
+也可以手动放行（管理员 PowerShell）：
 
 ```powershell
 New-NetFirewallRule -DisplayName "DSH Deskflow Discovery" -Direction Inbound -Protocol UDP -LocalPort 40801 -Action Allow

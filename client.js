@@ -12,7 +12,7 @@
     try { ReactDOM = require('react-dom'); } catch { /* 降级为非 portal 渲染 */ }
 
     // UI 版本（与 package.json version 同步；面板底部显示 "UI vX / Host vY" 用于排查 host 未重载）
-    const UI_VERSION = '1.1.0';
+    const UI_VERSION = '1.2.0';
 
     // 真实 cordis ctx 在 apply() 捕获；组件不通过 props 读它
     let realCtx = null;
@@ -56,6 +56,7 @@
       badgeErr: { background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 15%, transparent)', color: T.error },
       msgOk: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)', color: T.success, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-success-primary) 30%, transparent)' },
       msgErr: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)', color: T.error, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent)' },
+      msgWarn: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d97706) 12%, transparent)', color: 'var(--dsw-alias-state-warning-primary, #d97706)', border: '1px solid color-mix(in srgb, var(--dsw-alias-state-warning-primary, #d97706) 30%, transparent)' },
       empty: { textAlign: 'center', padding: '18px 8px', color: T.text3, fontSize: 12, lineHeight: 1.6 },
       note: { fontSize: 11, color: T.text3, margin: '8px 0 0 0', lineHeight: 1.5 },
       input: { width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text, fontSize: 12, fontFamily: FONT, outline: 'none' },
@@ -170,7 +171,9 @@
         setBusy(false);
         const r = res?.result;
         if (res?.ok && r?.ok) {
-          setMsg({ type: 'ok', text: r.message });
+          setMsg(r.warning
+            ? { type: 'warn', text: `${r.message}；⚠ ${r.warning}` }
+            : { type: 'ok', text: r.message });
           setModalPeer(null);
           refresh();
         } else {
@@ -195,6 +198,18 @@
         setBusy(false);
         if (res?.ok) { setMsg({ type: 'ok', text: discoveryOn ? '已关闭自动发现' : '已开启自动发现' }); refresh(); }
         else { setDiscOverride(null); setMsg({ type: 'err', text: res?.error?.message || '操作失败' }); }
+      };
+
+      // 一键放行防火墙：host 弹 UAC 提权（用户在系统弹窗确认），完成后重新检测
+      const doAllowFirewall = async () => {
+        if (busy) return;
+        setBusy(true);
+        setMsg({ type: 'warn', text: '请在系统弹出的管理员授权窗口中点「是」…' });
+        const res = await hostCall('firewall', { action: 'allow' });
+        setBusy(false);
+        if (res?.ok) setMsg({ type: 'ok', text: res.result?.message || '防火墙已放行' });
+        else setMsg({ type: 'err', text: res?.error?.message || '放行失败' });
+        refresh();
       };
 
       // 显式启动服务端：优先用已发现的对端（含其主机名，供服务端屏幕名单匹配），否则用手动 IP
@@ -246,9 +261,17 @@
           h('button', { onClick: () => setPanelOpen(false), style: { ...s.btnSecondary, border: 'none', background: 'transparent', color: T.text3, padding: '2px 6px' } }, '✕'),
         ),
 
-        msg ? h('div', { style: msg.type === 'ok' ? s.msgOk : s.msgErr }, msg.text) : null,
+        msg ? h('div', { style: msg.type === 'ok' ? s.msgOk : msg.type === 'warn' ? s.msgWarn : s.msgErr }, msg.text) : null,
         // 发现服务异常（如端口被占用）时才提示，自动重试中
         status?.discoveryError ? h('div', { style: s.msgErr }, `发现服务异常：${status.discoveryError}（自动重试中）`) : null,
+
+        // 防火墙未放行：对端连不进来（UDP 40801 发现 / TCP 24800 键鼠连接），一键放行（UAC 提权）
+        status?.firewall && status.firewall.allOk === false ? h('div', { style: s.msgWarn },
+          h('div', null, '⚠ 防火墙未放行，对端可能无法发现或连接本机'),
+          h('button', {
+            onClick: doAllowFirewall, disabled: busy,
+            style: { ...s.btnPrimary, marginTop: 8, opacity: busy ? 0.5 : 1 },
+          }, '一键放行（需管理员授权）')) : null,
 
         // 当前连接状态
         status ? h('div', { style: { ...s.peerCard, display: 'flex', alignItems: 'center', gap: 8 } },

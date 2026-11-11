@@ -104,7 +104,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.1.1';
+const PLUGIN_VERSION = '1.2.0';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -365,6 +365,64 @@ function readCoreMode() {
   return 0;
 }
 
+// ─── 防火墙放行（Windows）────────────────────────────────────────────────────
+// 插件安装（link / junction）拿不到管理员权限，无法静默改防火墙；
+// 采用「检测 + 一键放行」：检测走 netsh（普通权限即可），放行弹 UAC 由用户确认执行。
+const FW_RULES = [
+  { name: 'DSH Deskflow Discovery', proto: 'UDP', port: DISCOVERY_PORT },
+  { name: 'DSH Deskflow Core', proto: 'TCP', port: DEFAULT_CORE_PORT },
+];
+let fwCache = null; // { rules: { <ruleName>: bool } }，status 读缓存，check/allow 刷新
+
+function checkFirewall() {
+  const rules = {};
+  for (const r of FW_RULES) {
+    let out = '';
+    try {
+      out = String(spawnSync('netsh', ['advfirewall', 'firewall', 'show', 'rule', `name=${r.name}`],
+        { encoding: 'utf8', timeout: 8000, windowsHide: true }).stdout || '');
+    } catch { /* netsh 不可用按未放行处理 */ }
+    rules[r.name] = out.includes(r.name); // 规则存在时输出含规则名；缺失时输出"没有与指定标准相匹配的规则"
+  }
+  fwCache = { rules };
+  return rules;
+}
+
+function firewallState() {
+  if (!fwCache) return null;
+  return { rules: fwCache.rules, allOk: FW_RULES.every((r) => fwCache.rules[r.name]) };
+}
+
+function allowFirewall() {
+  // 删旧加新保证幂等；两条规则一个脚本一次 UAC 弹窗
+  const script = FW_RULES.map((r) =>
+    `netsh advfirewall firewall delete rule name="${r.name}" | Out-Null\r\n` +
+    `netsh advfirewall firewall add rule name="${r.name}" dir=in action=allow protocol=${r.proto} localport=${r.port}`
+  ).join('\r\n');
+  const tmp = path.join(os.tmpdir(), `dsh-deskflow-fw-${Date.now()}.ps1`);
+  fs.writeFileSync(tmp, script, 'utf8');
+  try {
+    const r = spawnSync('powershell.exe', [
+      '-NoProfile', '-Command',
+      `Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${tmp}'`,
+    ], { encoding: 'utf8', timeout: 120000, windowsHide: true });
+    const rules = checkFirewall();
+    const allOk = FW_RULES.every((x) => rules[x.name]);
+    if (allOk) return { ok: true, rules, message: '防火墙已放行（UDP 40801 / TCP 24800）' };
+    return {
+      ok: false,
+      rules,
+      message: r?.status === 0
+        ? '放行未生效：可能被组策略或杀毒软件拦截，请手动添加防火墙规则'
+        : '已取消管理员授权，防火墙未修改',
+    };
+  } catch (e) {
+    return { ok: false, message: `放行失败：${e?.message || e}` };
+  } finally {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+  }
+}
+
 // ─── 进程管理 ────────────────────────────────────────────────────────────────
 function killDeskflowChild() {
   if (deskflowChild) {
@@ -487,6 +545,16 @@ async function connect(args, config) {
   const launched = launchMode(config) === 'gui'
     ? await launchGui(config, role)
     : await launchHeadless(config, role, peerName || ip);
+
+  // 防火墙未放行时随结果给出警告（服务端缺入站 TCP 24800 时对端连不上——"连接成功"但键鼠不通）
+  let warning = null;
+  {
+    const fw = firewallState() || (checkFirewall(), firewallState());
+    if (fw && !fw.allOk) {
+      const missing = FW_RULES.filter((r) => !fw.rules[r.name]).map((r) => `${r.proto} ${r.port}`).join(' / ');
+      warning = `防火墙未放行 ${missing}，对端可能无法连接（可在面板点「一键放行」）`;
+    }
+  }
   return {
     ok: launched.ok,
     role,
@@ -494,6 +562,7 @@ async function connect(args, config) {
     mode: launchMode(config),
     confPath: file,
     deskflow: launched,
+    warning,
     message: launched.ok
       ? (role === 'server'
         ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(config)}）`
@@ -515,6 +584,8 @@ export function apply(ctx, config) {
   try { startDiscovery(pluginConfig); } catch (e) {
     console.warn('[deskflow] discovery start failed:', e?.message || e);
   }
+  // 启动后后台检测一次防火墙状态（status 读缓存，不阻塞 apply）
+  setTimeout(() => { try { if (process.platform === 'win32') checkFirewall(); } catch { /* ignore */ } }, 1500);
   // host 进程退出时广播 leaving，对端立即摘除本机
   try { process.once('exit', () => { try { announce(true); } catch { /* ignore */ } }); } catch { /* ignore */ }
 
@@ -562,6 +633,7 @@ export function apply(ctx, config) {
                   deskflowPid: deskflowChild?.pid || null,
                   deskflowPath: coreExePath(pluginConfig),
                   backendReady: fs.existsSync(coreExePath(pluginConfig)),
+                  firewall: firewallState(),
                   confPath: confPath(),
                   port: corePort,
                 },
@@ -580,6 +652,17 @@ export function apply(ctx, config) {
               }
               const enabled = setDiscovery(rpcArgs.enabled, pluginConfig);
               return reply({ ok: true, value: { ok: true, enabled } });
+            }
+            case 'firewall': {
+              // action=allow：弹 UAC 提权放行（用户在系统弹窗确认）；默认 check：普通权限检测
+              if (rpcArgs?.action === 'allow') {
+                const r = allowFirewall();
+                return reply(r.ok
+                  ? { ok: true, value: r }
+                  : { ok: false, error: { code: 'firewall-allow-failed', message: r.message || '放行失败', details: { rules: r.rules || {} } } });
+              }
+              const rules = checkFirewall();
+              return reply({ ok: true, value: { rules, allOk: FW_RULES.every((x) => rules[x.name]) } });
             }
             case 'connect': {
               const r = await connect(rpcArgs, pluginConfig);
