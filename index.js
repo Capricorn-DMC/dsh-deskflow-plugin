@@ -13,7 +13,7 @@ import dgram from 'dgram';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
-import { spawn, spawnSync, execSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 
@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.1.0';
+const PLUGIN_VERSION = '1.1.1';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
@@ -458,7 +458,7 @@ let managedPid = null;   // 当前受管的 core：自己 spawn 的，或接管�
 function procExists(pid) {
   if (process.platform !== 'win32') return false;
   try {
-    const out = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    const out = spawnSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', timeout: 5000, windowsHide: true }).stdout || '';
     return out.split(/\r?\n/).some((line) => line.includes(`,"${pid}",`));
   } catch { return false; }
 }
@@ -510,7 +510,7 @@ function killPidSync(pid) {
   if (!pid) return false;
   if (process.platform === 'win32') {
     try {
-      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', timeout: 4000, windowsHide: true });
+      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 4000, windowsHide: true });
       return true;
     } catch { return false; }
   }
@@ -590,8 +590,8 @@ function isElevated() {
   }
   // net session 仅管理员可执行，比 spawn 一个 PowerShell 快一个数量级
   try {
-    execSync('net session', { stdio: 'ignore', timeout: 3000, windowsHide: true });
-    elevatedCache = true;
+    const r = spawnSync('net', ['session'], { stdio: 'ignore', timeout: 3000, windowsHide: true });
+    elevatedCache = r.status === 0;
   } catch {
     elevatedCache = false;
   }
@@ -601,7 +601,7 @@ function isElevated() {
 function listImagePids(image) {
   if (process.platform !== 'win32') return null;
   try {
-    const out = execSync(`tasklist /FI "IMAGENAME eq ${image}" /FO CSV /NH`, { encoding: 'utf8', timeout: 5000, windowsHide: true });
+    const out = spawnSync('tasklist', ['/FI', `IMAGENAME eq ${image}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', timeout: 5000, windowsHide: true }).stdout || '';
     const pids = [];
     for (const line of out.split(/\r?\n/)) {
       const m = line.match(/^"[^"]+","(\d+)"/);
@@ -619,7 +619,7 @@ function cleanupInstances(image) {
   if (before === null) return { image, supported: false, before: 0, remaining: 0, ok: true };
   if (before.length === 0) return { image, supported: true, before: 0, remaining: 0, ok: true };
   try {
-    execSync(`taskkill /F /IM ${image}`, { stdio: 'ignore', timeout: 5000, windowsHide: true });
+    spawnSync('taskkill', ['/F', '/IM', image], { stdio: 'ignore', timeout: 5000, windowsHide: true });
   } catch { /* 没有实例或权限不足，交给下面的复查判断 */ }
   const after = listImagePids(image) || [];
   return {
