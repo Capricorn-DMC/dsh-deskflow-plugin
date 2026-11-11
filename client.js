@@ -12,7 +12,7 @@
     try { ReactDOM = require('react-dom'); } catch { /* 降级为非 portal 渲染 */ }
 
     // UI 版本（与 package.json version 同步；面板底部显示 "UI vX / Host vY" 用于排查 host 未重载）
-    const UI_VERSION = '1.6.1';
+    const UI_VERSION = '1.6.2';
 
     // 真实 cordis ctx 在 apply() 捕获；组件不通过 props 读它
     let realCtx = null;
@@ -51,6 +51,8 @@
       btnPrimary: { padding: '6px 12px', borderRadius: 6, border: 'none', background: T.accent, color: '#fff', fontSize: 12, fontWeight: 500, cursor: 'pointer', whiteSpace: 'nowrap' },
       btnSecondary: { padding: '5px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' },
       btnDanger: { padding: '5px 10px', borderRadius: 6, border: `1px solid ${T.error}`, background: 'transparent', color: T.error, fontSize: 12, cursor: 'pointer', whiteSpace: 'nowrap' },
+      // 等宽按钮：面板只有 340px，长文案要允许换行
+      btnHalf: { flex: 1, textAlign: 'center', fontSize: 11, lineHeight: 1.35, whiteSpace: 'normal', padding: '6px 8px' },
       badge: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 500 },
       badgeOk: { background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 15%, transparent)', color: T.success },
       badgeErr: { background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 15%, transparent)', color: T.error },
@@ -87,6 +89,8 @@
     };
 
     const CORE_MODE_NAMES = { 0: '未连接', 1: '客户端', 2: '服务端' };
+    // 光写"服务端/客户端"容易被理解成对方的角色，补一句本机实际在做什么
+    const CORE_MODE_HINTS = { 1: '（改用对方键鼠）', 2: '（本机键鼠共享给对方）' };
 
     // ─── 角色协商弹窗 ───────────────────────────────────────────────────────
     function NegotiationModal({ peer, busy, onPick, onClose }) {
@@ -217,17 +221,22 @@
       };
 
       // 显式启动服务端：优先用已发现的对端（含其主机名，供服务端屏幕名单匹配），否则用手动 IP
+      // 注意：后端只认 peerIp / peerInstance / ip 三个字段，之前传的是 { peer:{name,ip} }，
+      // 服务端因此拿不到对端屏幕名——不报错，但键鼠永远过不去。
       const doStartServer = async () => {
         if (busy) return;
-        const target = peers[0]
-          ? { peer: { name: peers[0].name, ip: peers[0].ip } }
-          : (manualIp.trim() ? { ip: manualIp.trim() } : null);
-        if (!target) { setMsg({ type: 'err', text: '启动服务端需要指定对端：等待发现设备出现，或在下方填写对端 IP' }); return; }
+        const found = peers[0] || null;
+        const ip = found ? found.ip : manualIp.trim();
+        if (!ip) { setMsg({ type: 'err', text: '启动服务端需要指定对端：等待发现设备出现，或在下方填写对端 IP' }); return; }
         setBusy(true); setMsg(null);
-        const res = await hostCall('connect', { role: 'server', ...target });
+        const res = await hostCall('connect', { role: 'server', peerIp: ip });
         setBusy(false);
-        if (res?.ok) { setMsg({ type: 'ok', text: '服务端已启动，等待对端客户端接入' }); refresh(); }
-        else setMsg({ type: 'err', text: res?.error?.message || '启动失败' });
+        const r = res?.result;
+        if (res?.ok && r?.ok) {
+          const warns = Array.isArray(r.warnings) && r.warnings.length ? r.warnings : (r.warning ? [r.warning] : []);
+          setMsg(warns.length ? { type: 'warn', text: `${r.message}\n${warns.map((w) => `⚠ ${w}`).join('\n')}` } : { type: 'ok', text: r.message });
+          refresh();
+        } else setMsg({ type: 'err', text: (r && r.message) || res?.error?.message || '启动失败' });
       };
 
       const doConnectIp = async (role) => {
@@ -238,7 +247,11 @@
         const res = await hostCall('connect', { role, ip });
         setBusy(false);
         const r = res?.result;
-        if (res?.ok && r?.ok) { setMsg({ type: 'ok', text: r.message }); refresh(); }
+        if (res?.ok && r?.ok) {
+          const warns = Array.isArray(r.warnings) && r.warnings.length ? r.warnings : (r.warning ? [r.warning] : []);
+          setMsg(warns.length ? { type: 'warn', text: `${r.message}\n${warns.map((w) => `⚠ ${w}`).join('\n')}` } : { type: 'ok', text: r.message });
+          refresh();
+        }
         else setMsg({ type: 'err', text: (r && r.message) || res?.error?.message || '连接失败' });
       };
 
@@ -280,13 +293,13 @@
         // 当前连接状态
         status ? h('div', { style: { ...s.peerCard, display: 'flex', alignItems: 'center', gap: 8 } },
           h('div', { style: { flex: 1 } },
-            h('div', { style: { fontSize: 12, fontWeight: 600 } }, `本机角色：${CORE_MODE_NAMES[status.coreMode] || '未知'}`),
+            h('div', { style: { fontSize: 12, fontWeight: 600 } }, `本机角色：${CORE_MODE_NAMES[status.coreMode] || '未知'}${CORE_MODE_HINTS[status.coreMode] || ''}`),
             h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
               status.deskflowRunning ? `后台核心运行中（PID ${status.deskflowPid}）` : '空闲（点下方按钮启动）')),
           connected && !busy
             ? h('button', { onClick: doDisconnect, disabled: busy, style: s.btnDanger }, '断开')
             : !busy
-              ? h('button', { onClick: doStartServer, style: s.btnPrimary }, '启动服务端')
+              ? h('button', { onClick: doStartServer, title: '本机作为 Deskflow 服务端，把本机键鼠共享给已发现的设备（未发现设备时用手动 IP）', style: s.btnPrimary }, '共享本机键鼠')
               : null,
         ) : null,
 
@@ -313,12 +326,21 @@
           : peers.length === 0
             ? h('div', { style: s.empty }, '正在搜索局域网内安装了本插件的设备…', h('br'), '对端电脑需安装 DeepSeek Harness 并启用本插件')
             : peers.map(p => h('div', { key: p.instance, style: s.peerCard },
-              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-                h('div', { style: { flex: 1, minWidth: 0 } },
-                  h('div', { style: s.peerName }, p.name),
-                  h('div', { style: s.peerMeta }, `${p.ip}:${p.port}`)),
-                h('button', { onClick: () => doConnect('server', p), disabled: busy, style: s.btnPrimary, title: '本机作为服务端：用本机键鼠控制对方' }, '服务端'),
-                h('button', { onClick: () => doConnect('client', p), disabled: busy, style: s.btnSecondary, title: '本机作为客户端：使用对方键鼠' }, '客户端'),
+              h('div', { style: s.peerName }, p.name),
+              h('div', { style: s.peerMeta }, `${p.ip}:${p.port}`),
+              // 按钮文案描述的是"本机做什么"，不是"对方是什么"——两个动作互为镜像，
+              // 只写「服务端/客户端」会被读成对方的角色（正好反了），所以直接写清主客体
+              h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                h('button', {
+                  onClick: () => doConnect('server', p), disabled: busy,
+                  style: { ...s.btnPrimary, ...s.btnHalf },
+                  title: `本机作为 Deskflow 服务端：把本机键鼠共享给 ${p.name}（${p.name} 将作为客户端接入本机）`,
+                }, '用本机键鼠控制对方'),
+                h('button', {
+                  onClick: () => doConnect('client', p), disabled: busy,
+                  style: { ...s.btnSecondary, ...s.btnHalf },
+                  title: `本机作为 Deskflow 客户端：改用 ${p.name} 的键鼠（${p.name} 将作为服务端）`,
+                }, '用对方键鼠控制本机'),
               ))),
 
         // 手动连接（无需发现，直接指定 IP）
@@ -331,12 +353,20 @@
             style: s.input,
           }),
           h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
-            h('button', { onClick: () => doConnectIp('server'), disabled: busy, style: { ...s.btnPrimary, flex: 1 }, title: '本机作为服务端：用本机键鼠控制该 IP 的设备' }, '作为服务端连接'),
-            h('button', { onClick: () => doConnectIp('client'), disabled: busy, style: { ...s.btnSecondary, flex: 1 }, title: '本机作为客户端：使用该 IP 设备的键鼠' }, '作为客户端连接'),
+            h('button', {
+              onClick: () => doConnectIp('server'), disabled: busy,
+              style: { ...s.btnPrimary, ...s.btnHalf },
+              title: '本机作为 Deskflow 服务端：把本机键鼠共享给该 IP 的设备',
+            }, '用本机键鼠控制对方'),
+            h('button', {
+              onClick: () => doConnectIp('client'), disabled: busy,
+              style: { ...s.btnSecondary, ...s.btnHalf },
+              title: '本机作为 Deskflow 客户端：改用该 IP 设备的键鼠',
+            }, '用对方键鼠控制本机'),
           ),
         ),
 
-        h('p', { style: s.note }, '选择"服务端"= 用本机键鼠控制对方；"客户端"= 使用对方键鼠。连接后在后台无窗口运行。'),
+        h('p', { style: s.note }, '按钮说的是「本机」要做什么：左边=本机作服务端，把本机键鼠共享给对方；右边=本机作客户端，改用对方的键鼠。连接后在后台无窗口运行。'),
 
         // 版本号（renderer 与 host 可能不同步，用于排查）
         h('div', { style: { fontSize: 10, color: T.text3, textAlign: 'center', marginTop: 10 } },

@@ -68,7 +68,7 @@ function layoutDir(config) {
 const instanceId = randomUUID();
 const selfName = os.hostname();
 // 插件版本（与 package.json 同步；status 返回给面板显示 "Host vX"，排查 host 未重载）
-const PLUGIN_VERSION = '1.6.1';
+const PLUGIN_VERSION = '1.6.2';
 const peers = new Map(); // instance -> {instance, name, ip, port, lastSeen}
 
 let socket = null;
