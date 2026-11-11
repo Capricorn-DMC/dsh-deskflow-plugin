@@ -23,18 +23,22 @@
 
 ## 安装
 
-### 第 1 步：下载并解压后端（约 22 MB）
+### 第 1 步：clone 仓库（后端无需手动解压）
 
 仓库内已附带后端压缩包 **`deskflow-backend-win64.zip`**（Windows x64，含 `deskflow-core.exe` 及全部运行时 DLL）。
 
 ```powershell
 git clone https://github.com/Capricorn-DMC/dsh-deskflow-plugin.git
-# 解压 zip 内全部文件到后端目录
+```
+
+**首次启动核心时会自动解压**：插件检测到 `~/.dsh/deskflow-backend/deskflow-core.exe` 缺失时，会自动把仓库内的 zip 解压到该目录（约需十几秒）。
+
+如果想提前手动解压（可选）：
+
+```powershell
 Expand-Archive -Path .\dsh-deskflow-plugin\deskflow-backend-win64.zip `
   -DestinationPath "$env:USERPROFILE\.dsh\deskflow-backend"
 ```
-
-解压后确认 `$env:USERPROFILE\.dsh\deskflow-backend\deskflow-core.exe` 存在即可。
 
 ### 第 2 步：注册插件到 DSH profile
 
