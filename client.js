@@ -51,6 +51,11 @@
       msgErr: { padding: '8px 12px', borderRadius: 8, fontSize: 12, marginBottom: 10, background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)', color: T.error, border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 30%, transparent)' },
       empty: { textAlign: 'center', padding: '18px 8px', color: T.text3, fontSize: 12, lineHeight: 1.6 },
       note: { fontSize: 11, color: T.text3, margin: '8px 0 0 0', lineHeight: 1.5 },
+      input: { width: '100%', boxSizing: 'border-box', padding: '7px 10px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, color: T.text, fontSize: 12, fontFamily: FONT, outline: 'none' },
+      toggle: { position: 'relative', width: 34, height: 19, borderRadius: 10, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, cursor: 'pointer', padding: 0, flexShrink: 0 },
+      toggleOn: { background: T.accent, borderColor: T.accent },
+      toggleKnob: { position: 'absolute', top: 1, left: 1, width: 15, height: 15, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.2)', transition: 'left 0.15s ease' },
+      toggleKnobOn: { left: 16 },
     };
 
     // ─── Host RPC ───────────────────────────────────────────────────────────
@@ -103,8 +108,11 @@
       const [modalPeer, setModalPeer] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [msg, setMsg] = React.useState(null);
+      const [manualIp, setManualIp] = React.useState('');
       const seenRef = React.useRef(null);
       const firstPollRef = React.useRef(true);
+      // 自动发现开关初始态从 status.discoveryEnabled 同步（status 为空时默认开启）
+      const discoveryOn = status ? status.discoveryEnabled !== false : true;
 
       const refresh = React.useCallback(async () => {
         const res = await hostCall('peers');
@@ -163,6 +171,27 @@
         else setMsg({ type: 'err', text: res?.error?.message || '断开失败' });
       };
 
+      const doToggleDiscovery = async () => {
+        setBusy(true);
+        setMsg(null);
+        const res = await hostCall('discovery', { enabled: !discoveryOn });
+        setBusy(false);
+        if (res?.ok) { setMsg({ type: 'ok', text: discoveryOn ? '已关闭自动发现' : '已开启自动发现' }); refresh(); }
+        else setMsg({ type: 'err', text: res?.error?.message || '操作失败' });
+      };
+
+      const doConnectIp = async (role) => {
+        const ip = manualIp.trim();
+        if (!ip) { setMsg({ type: 'err', text: '请先输入对端 IP' }); return; }
+        setBusy(true);
+        setMsg(null);
+        const res = await hostCall('connect', { role, ip });
+        setBusy(false);
+        const r = res?.result;
+        if (res?.ok && r?.ok) { setMsg({ type: 'ok', text: r.message }); refresh(); }
+        else setMsg({ type: 'err', text: (r && r.message) || res?.error?.message || '连接失败' });
+      };
+
       const isRail = wide === false;
       const connected = status && (status.coreMode === 1 || status.coreMode === 2);
 
@@ -181,8 +210,8 @@
         // 头部
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 } },
           h('div', { style: { fontSize: 16, fontWeight: 600, flex: 1 } }, '键鼠共享'),
-          h('span', { style: { ...s.badge, ...(status?.discovering ? s.badgeOk : s.badgeErr) } },
-            status?.discovering ? '● 发现中' : '● 未运行'),
+          h('span', { style: { ...s.badge, ...(status?.discovering && discoveryOn ? s.badgeOk : s.badgeErr) } },
+            discoveryOn ? (status?.discovering ? '● 发现中' : '● 未运行') : '● 已关闭'),
           h('button', { onClick: () => setPanelOpen(false), style: { ...s.btnSecondary, border: 'none', background: 'transparent', color: T.text3, padding: '2px 6px' } }, '✕'),
         ),
 
@@ -199,13 +228,29 @@
             : null,
         ) : null,
 
+        // 自动发现开关
+        h('div', { style: { ...s.peerCard, display: 'flex', alignItems: 'center', gap: 8 } },
+          h('div', { style: { flex: 1 } },
+            h('div', { style: { fontSize: 12, fontWeight: 600 } }, '自动发现'),
+            h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
+              discoveryOn ? '正在广播并搜索局域网设备' : '已关闭：不广播，也不记录新设备')),
+          h('button', {
+            onClick: doToggleDiscovery,
+            disabled: busy,
+            title: discoveryOn ? '关闭自动发现' : '开启自动发现',
+            style: { ...s.toggle, ...(discoveryOn ? s.toggleOn : {}), opacity: busy ? 0.5 : 1 },
+          }, h('span', { style: { ...s.toggleKnob, ...(discoveryOn ? s.toggleKnobOn : {}) } })),
+        ),
+
         // 设备列表
         h('div', { style: { ...s.sectionTitle, marginTop: 14 } },
           h('span', null, '局域网设备'),
           h('span', { style: { ...s.badge, background: T.bgLayer2, color: T.text3 } }, `${peers.length}`)),
-        peers.length === 0
-          ? h('div', { style: s.empty }, '正在搜索局域网内安装了本插件的设备…', h('br'), '对端电脑需安装 DeepSeek Harness 并启用本插件')
-          : peers.map(p => h('div', { key: p.instance, style: s.peerCard },
+        !discoveryOn
+          ? h('div', { style: s.empty }, '发现已关闭', h('br'), '打开上方「自动发现」开关以搜索局域网设备')
+          : peers.length === 0
+            ? h('div', { style: s.empty }, '正在搜索局域网内安装了本插件的设备…', h('br'), '对端电脑需安装 DeepSeek Harness 并启用本插件')
+            : peers.map(p => h('div', { key: p.instance, style: s.peerCard },
               h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
                 h('div', { style: { flex: 1, minWidth: 0 } },
                   h('div', { style: s.peerName }, p.name),
@@ -213,6 +258,21 @@
                 h('button', { onClick: () => doConnect('server', p), disabled: busy, style: s.btnPrimary, title: '本机作为服务端：用本机键鼠控制对方' }, '服务端'),
                 h('button', { onClick: () => doConnect('client', p), disabled: busy, style: s.btnSecondary, title: '本机作为客户端：使用对方键鼠' }, '客户端'),
               ))),
+
+        // 手动连接（无需发现，直接指定 IP）
+        h('div', { style: { ...s.sectionTitle, marginTop: 14 } }, h('span', null, '手动连接')),
+        h('div', { style: s.peerCard },
+          h('input', {
+            value: manualIp,
+            onChange: (e) => setManualIp(e.target.value),
+            placeholder: '对端 IP，如 192.168.1.23',
+            style: s.input,
+          }),
+          h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+            h('button', { onClick: () => doConnectIp('server'), disabled: busy, style: { ...s.btnPrimary, flex: 1 }, title: '本机作为服务端：用本机键鼠控制该 IP 的设备' }, '作为服务端连接'),
+            h('button', { onClick: () => doConnectIp('client'), disabled: busy, style: { ...s.btnSecondary, flex: 1 }, title: '本机作为客户端：使用该 IP 设备的键鼠' }, '作为客户端连接'),
+          ),
+        ),
 
         h('p', { style: s.note }, '选择"服务端"= 用本机键鼠控制对方；"客户端"= 使用对方键鼠。连接后在后台无窗口运行。'),
       ) : null;

@@ -5,7 +5,7 @@
  * - 局域网自动发现：UDP 40801 广播，协议与 Deskflow fork 内置 C++ 版一致
  *   （{proto:'deepseek-harness', ver:1, instance, name, port, leaving}，1.5s 周期，6s 超时）
  * - 角色协商连接：Web 面板里选服务端/客户端，写 Deskflow QSettings ini 后拉起 deskflow.exe
- * - RPC：/api/deskflow（status/peers/connect/stop/scan），供 client.js 面板调用
+ * - RPC：/api/deskflow（status/peers/discovery/connect/stop/scan），供 client.js 面板调用
  * - Tools：deskflow_status / deskflow_scan_peers / deskflow_connect / deskflow_disconnect
  */
 
@@ -69,6 +69,7 @@ let pruneTimer = null;
 let restartTimer = null;
 let deskflowChild = null;
 let corePort = DEFAULT_CORE_PORT;
+let discoveryEnabled = true; // 自动发现开关（RPC discovery 控制广播与记录）
 
 // ─── UDP 发现（复刻 C++ LanDiscovery 协议）──────────────────────────────────
 function broadcastTargets() {
@@ -83,6 +84,7 @@ function broadcastTargets() {
 
 function announce(leaving = false) {
   if (!socket) return;
+  if (!discoveryEnabled && !leaving) return; // 关闭发现：停止广播（退出时的 leaving 除外）
   const msg = Buffer.from(JSON.stringify({
     proto: DISCOVERY_PROTO,
     ver: 1,
@@ -113,6 +115,7 @@ function startDiscovery(config) {
   const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
   socket = sock;
   sock.on('message', (buf, rinfo) => {
+    if (!discoveryEnabled) return; // 关闭发现：包仍接收但忽略不记录
     let msg;
     try { msg = JSON.parse(buf.toString('utf8')); } catch { return; }
     if (!msg || typeof msg !== 'object') return;
@@ -130,19 +133,40 @@ function startDiscovery(config) {
   sock.on('error', () => {
     // 绑定失败（端口被独占）等情况：10s 后重试
     stopDiscovery();
-    restartTimer = setTimeout(() => { try { startDiscovery(config); } catch { /* 保持静默 */ } }, 10000);
+    restartTimer = setTimeout(() => { if (discoveryEnabled) { try { startDiscovery(config); } catch { /* 保持静默 */ } } }, 10000);
   });
   sock.bind(DISCOVERY_PORT, () => {
     try { sock.setBroadcast(true); } catch { /* 部分平台默认已允许 */ }
   });
   announceTimer = setInterval(() => announce(false), ANNOUNCE_INTERVAL_MS);
-  pruneTimer = setInterval(() => {
-    const now = Date.now();
-    for (const [k, v] of peers) {
-      if (now - v.lastSeen > PEER_TIMEOUT_MS) peers.delete(k);
-    }
-  }, 2000);
+  pruneTimer = setInterval(prunePeers, 2000);
   announce(false);
+}
+
+function prunePeers() {
+  const now = Date.now();
+  for (const [k, v] of peers) {
+    if (now - v.lastSeen > PEER_TIMEOUT_MS) peers.delete(k);
+  }
+}
+
+// ─── 发现开关（面板「自动发现」）─────────────────────────────────────────────
+// 关闭：停广播/清空 peers（socket 保持监听但忽略新包）；开启：恢复广播与记录。
+function setDiscovery(on, config) {
+  discoveryEnabled = !!on;
+  if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+  if (!discoveryEnabled) {
+    if (announceTimer) { clearInterval(announceTimer); announceTimer = null; }
+    if (pruneTimer) { clearInterval(pruneTimer); pruneTimer = null; }
+    peers.clear();
+  } else if (socket) {
+    if (!announceTimer) announceTimer = setInterval(() => announce(false), ANNOUNCE_INTERVAL_MS);
+    if (!pruneTimer) pruneTimer = setInterval(prunePeers, 2000);
+    announce(false);
+  } else {
+    try { startDiscovery(config); } catch { /* 保持静默 */ }
+  }
+  return discoveryEnabled;
 }
 
 function peerList() {
@@ -380,11 +404,12 @@ async function connect(args, config) {
   if (!role) return { ok: false, message: 'role 必须是 server 或 client' };
 
   let ip = typeof args?.peerIp === 'string' && args.peerIp ? args.peerIp : null;
+  if (!ip && typeof args?.ip === 'string' && args.ip.trim()) ip = args.ip.trim(); // 纯 IP 手动直连
   if (!ip && typeof args?.peerInstance === 'string') {
     const p = peers.get(args.peerInstance);
     if (p) ip = p.ip;
   }
-  if (role === 'client' && !ip) return { ok: false, message: 'client 角色需要指定对端（peerInstance 或 peerIp）' };
+  if (role === 'client' && !ip) return { ok: false, message: 'client 角色需要指定对端（peerInstance、peerIp 或 ip）' };
 
   let peerName = null;
   // 服务端角色：把对端屏幕名登记进 server config（对齐 C++ 版 applyLanRole 的 addClient）
@@ -394,6 +419,7 @@ async function connect(args, config) {
     } else if (ip) {
       for (const p of peers.values()) if (p.ip === ip) { peerName = p.name; break; }
     }
+    if (!peerName && ip) peerName = ip; // 纯 IP 直连：以 IP 作为对端屏幕名（peer={ip, name:ip}）
     try { addServerScreen(peerName || args?.peerName); } catch { /* 失败不阻断连接 */ }
   }
 
@@ -458,6 +484,8 @@ export function apply(ctx, config) {
         const rpcId = typeof message?.rpcId === 'string' ? message.rpcId : 'invalid-request';
         const call = message?.payload;
         const method = call?.method;
+        // 兼容两种载荷形状：{method, ...args}（扁平）与 {method, payload:{...args}}（嵌套）
+        const rpcArgs = isRecord(call?.payload) ? call.payload : call;
 
         const reply = (result) => Response.json({ type: 'server-response', rpcId, result });
 
@@ -476,6 +504,7 @@ export function apply(ctx, config) {
                   instance: instanceId,
                   name: selfName,
                   discovering: !!socket,
+                  discoveryEnabled,
                   peerCount: peerList().length,
                   coreMode: readCoreMode(),
                   deskflowRunning: !!deskflowChild,
@@ -494,8 +523,15 @@ export function apply(ctx, config) {
               announce(false);
               return reply({ ok: true, result: { instance: instanceId, peers: peerList() } });
             }
+            case 'discovery': {
+              if (typeof rpcArgs?.enabled !== 'boolean') {
+                return reply({ ok: false, error: { code: 'bad-request', message: 'enabled 必须是 boolean', details: {} } });
+              }
+              const enabled = setDiscovery(rpcArgs.enabled, pluginConfig);
+              return reply({ ok: true, result: { ok: true, enabled } });
+            }
             case 'connect': {
-              const r = await connect(call, pluginConfig);
+              const r = await connect(rpcArgs, pluginConfig);
               return reply({ ok: r.ok, result: r });
             }
             case 'stop': {
