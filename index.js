@@ -561,10 +561,12 @@ async function launchHeadless(config, role, peerName) {
         externalConfig: 'true',
         externalConfigFile: serverConf.replace(/\\/g, '/'),
         // 心跳检测：服务端解析 server config 的 options 段时注入 kOptionHeartbeat
-        // （Config.cpp readSectionOptions 从主 conf 读这两个键），
-        // 客户端失联约 3 个心跳周期即被剔除，避免 core 异常退出后服务端残留僵尸会话"假在线"
-        enableHeartbeat: 'true',
-        heartbeat: '5000',
+        // （Config.cpp readSectionOptions 从主 conf 读这两个键）。
+        // 默认关闭：实测该实现下心跳写失败会掐断连接（连上约 10s 即断、客户端反复重连），
+        // 而僵尸会话在实际使用中影响很小；确需检测时在插件 config 里设
+        // { "heartbeat": true, "heartbeatInterval": 30000 }，间隔建议 ≥30s。
+        enableHeartbeat: String(config?.heartbeat === true),
+        heartbeat: String(Number(config?.heartbeatInterval) > 0 ? Number(config.heartbeatInterval) : 30000),
       },
     });
     return await launchProcess(config, exe, ['server', ...args], '键鼠共享服务端核心', { killImage: 'deskflow-core.exe' });
