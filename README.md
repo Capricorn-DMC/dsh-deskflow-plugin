@@ -23,9 +23,20 @@
 
 ## 安装
 
-```bash
+### 第 1 步：下载并解压后端（约 22 MB）
+
+仓库内已附带后端压缩包 **`deskflow-backend-win64.zip`**（Windows x64，含 `deskflow-core.exe` 及全部运行时 DLL）。
+
+```powershell
 git clone https://github.com/Capricorn-DMC/dsh-deskflow-plugin.git
+# 解压 zip 内全部文件到后端目录
+Expand-Archive -Path .\dsh-deskflow-plugin\deskflow-backend-win64.zip `
+  -DestinationPath "$env:USERPROFILE\.dsh\deskflow-backend"
 ```
+
+解压后确认 `$env:USERPROFILE\.dsh\deskflow-backend\deskflow-core.exe` 存在即可。
+
+### 第 2 步：注册插件到 DSH profile
 
 编辑 `~/.dsh/profiles/desktop/package.json`：
 
@@ -53,6 +64,15 @@ New-Item -ItemType Junction `
 ```
 
 重启 DeepSeek Harness 客户端，侧栏底部出现「⌨ 键鼠共享」即安装成功。
+
+### 第 3 步：防火墙放行（两端都要）
+
+管理员 PowerShell：
+
+```powershell
+New-NetFirewallRule -DisplayName "DSH Deskflow Discovery" -Direction Inbound -Protocol UDP -LocalPort 40801 -Action Allow
+New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protocol TCP -LocalPort 24800 -Action Allow
+```
 
 ## 配置
 
