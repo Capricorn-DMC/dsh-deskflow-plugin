@@ -59,9 +59,33 @@ function launchMode(config) {
   return config?.launchMode === 'gui' ? 'gui' : 'headless';
 }
 
-// 对端屏幕相对本机服务端屏幕的方向
+// 插件自身的小设置（面板/工具选择的方向等），独立于 cordis 注入的 config：
+// cordis config 是部署期写死的，方向这类运行期偏好存这里才能跨重启生效
+const SETTINGS_FILE = path.join(os.homedir(), '.dsh', 'deskflow-settings.json');
+const LAYOUT_DIRS = ['right', 'left', 'top', 'bottom'];
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+    return isRecord(s) ? s : {};
+  } catch { /* 首次运行或文件损坏则忽略 */ return {}; }
+}
+
+function saveSettings(patch) {
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ ...loadSettings(), ...patch }, null, 2), 'utf8');
+  } catch { /* 设置写不进去只影响持久化，不阻断连接 */ }
+}
+
+// 对端屏幕相对本机服务端屏幕的方向。
+// 优先级：显式插件配置 config.layout > 面板/工具选择（存 settings 文件）> right。
+// 方向只由服务端侧的 links 决定（客户端 conf 不承载布局），所以要在"作为服务端的那台机器"上设置。
 function layoutDir(config) {
-  return ['right', 'left', 'top', 'bottom'].includes(config?.layout) ? config.layout : 'right';
+  if (LAYOUT_DIRS.includes(config?.layout)) return config.layout;
+  const saved = loadSettings().layout;
+  if (LAYOUT_DIRS.includes(saved)) return saved;
+  return 'right';
 }
 
 // ─── 发现状态（模块级，随 DSH host 进程存续）─────────────────────────────────
@@ -804,6 +828,15 @@ async function connect(args, config) {
   if (role === 'client' && !ip) return { ok: false, message: 'client 角色需要指定对端（peerInstance、peerIp 或 ip）' };
 
   let peerName = null;
+  // 方向（仅服务端角色有意义）：本次显式给的优先，并持久化——之后的服务端连接沿用；
+  // effConfig 让本次生成的 links 与接管签名都按新方向算，方向变了会强制重启核心而不是沿用旧布局。
+  // 客户端角色不接收方向：links 在服务端 conf 里，客户端侧设置没有意义
+  let layoutArg = null;
+  if (role === 'server' && typeof args?.layout === 'string' && LAYOUT_DIRS.includes(args.layout)) {
+    layoutArg = args.layout;
+    saveSettings({ layout: layoutArg });
+  }
+  const effConfig = layoutArg ? { ...config, layout: layoutArg } : config;
   // 服务端角色：把对端屏幕名登记进 server config（对齐 C++ 版 applyLanRole 的 addClient）
   if (role === 'server') {
     if (typeof args?.peerInstance === 'string' && peers.get(args.peerInstance)) {
@@ -835,7 +868,7 @@ async function connect(args, config) {
     const want = {
       role,
       peer: role === 'client' ? ip : (peerName || null),
-      layout: layoutDir(config),
+      layout: layoutDir(effConfig),
       mode: launchMode(config),
     };
     if (want.mode === 'headless') {
@@ -856,7 +889,7 @@ async function connect(args, config) {
         console.log(`[deskflow] 现存核心与本次连接不一致，将重启：${verdict.reason}`);
       }
     }
-    return launchMode(config) === 'gui' ? await launchGui(config, role) : await launchHeadless(config, role, peerName || ip);
+    return launchMode(config) === 'gui' ? await launchGui(effConfig, role) : await launchHeadless(effConfig, role, peerName || ip);
   })();
 
   if (launched && launched.ok === false && adoptNote) {
@@ -889,9 +922,9 @@ async function connect(args, config) {
   // 接管时不能说"已启动"——核心根本没重启，这行文案是用户判断"有没有断线"的唯一依据
   const startNote = launched?.adopted
     ? `已接管仍在运行的后台核心（PID ${launched.pid}，配置一致，未重启）`
-    : (role === 'server'
-      ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(config)}）`
-      : `本机作为客户端，连接 ${ip}；后台核心已启动`);
+      : (role === 'server'
+        ? `本机作为服务端，共享键鼠；后台核心已启动（对端：${peerName || '未指定'}，方向：${layoutDir(effConfig)}）`
+        : `本机作为客户端，连接 ${ip}；后台核心已启动`);
 
   return {
     ok: launched.ok,
@@ -910,6 +943,38 @@ async function connect(args, config) {
 
 // ─── cordis apply ────────────────────────────────────────────────────────────
 function isRecord(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+
+// 方向设置：持久化后，若本机正以服务端核心运行，立即按新方向重启核心（面板/工具改方向即生效，
+// 无需手动断开重连）。方向只由服务端决定：本机是客户端时拒绝设置，请到服务端那台电脑上改。
+async function setLayout(dir, config) {
+  if (!LAYOUT_DIRS.includes(dir)) return { ok: false, message: 'layout 必须是 right/left/top/bottom' };
+  const rt = coreRuntime();
+  if (rt.running && rt.state?.role === 'client') {
+    return {
+      ok: false,
+      layout: layoutDir(config),
+      clientMode: true,
+      message: '本机当前是客户端：方向由服务端决定，请在作为服务端的那台电脑上设置',
+    };
+  }
+  const previous = layoutDir(config);
+  saveSettings({ layout: dir });
+
+  const st = rt.state;
+  let restarted = null;
+  if (rt.running && st?.role === 'server') {
+    // launchProcess 内部会先结束现有核心并清孤儿实例，再按新 layout 重新生成 links
+    try { patchConf({ core: { coreMode: 2 } }); } catch { /* ignore */ }
+    const r = await launchHeadless({ ...config, layout: dir }, 'server', st.peer || null);
+    restarted = r?.ok
+      ? { ok: true, pid: r.pid, message: `方向已切换为 ${dir}，服务端核心已按新方向重启（对端：${st.peer || '未指定'}）` }
+      : { ok: false, message: `方向已保存为 ${dir}，但重启核心失败：${r?.message || '未知原因'}` };
+  } else {
+    restarted = { skipped: 'idle', message: `方向已保存为 ${dir}，下次服务端连接生效` };
+  }
+
+  return { ok: restarted?.ok !== false, layout: dir, previous, restarted };
+}
 
 function renderJson(_args, value) {
   return [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }];
@@ -999,6 +1064,7 @@ export function apply(ctx, config) {
                   adoptedCore: rt.adopted,
                   coreState: rt.state,
                   firewall: firewallState(),
+                  layout: layoutDir(pluginConfig),
                   confPath: confPath(),
                   port: corePort,
                 },
@@ -1072,6 +1138,11 @@ export function apply(ctx, config) {
                 },
               });
             }
+            case 'setLayout': {
+              const r = await setLayout(rpcArgs?.layout, pluginConfig);
+              if (r?.ok) return reply({ ok: true, value: r });
+              return reply({ ok: false, error: { code: 'set-layout-failed', message: r?.message || '设置失败', details: {} } });
+            }
             case 'stop': {
               const killed = killDeskflowChild();
               // 顺带清掉脱离句柄的孤儿实例，否则"停止"后再连接会出现两个同名客户端
@@ -1134,13 +1205,14 @@ export function apply(ctx, config) {
 
   ctx.tools.register({
     name: 'deskflow_connect',
-    description: '连接键鼠共享。role=server 时本机共享键鼠给局域网设备；role=client 时本机使用对端键鼠（需提供对端 IP 或 discovery 返回的 instance）。写 Deskflow 配置后自动拉起 Deskflow。',
+    description: '连接键鼠共享。role=server 时本机共享键鼠给局域网设备；role=client 时本机使用对端键鼠（需提供对端 IP 或 discovery 返回的 instance）。写 Deskflow 配置后自动拉起 Deskflow。layout 仅在 role=server 时生效：对端屏幕相对本机的方位（right/left/top/bottom），指定后会被记住，之后的连接沿用。',
     parameters: {
       type: 'object',
       properties: {
         role: { type: 'string', enum: ['server', 'client'], description: 'server=本机作为服务端共享键鼠；client=本机作为客户端使用对方键鼠' },
         peerInstance: { type: 'string', description: '对端 instance id（deskflow_scan_peers 返回）' },
         peerIp: { type: 'string', description: '对端 IP（与 peerInstance 二选一，client 角色必填其一）' },
+        layout: { type: 'string', enum: ['right', 'left', 'top', 'bottom'], description: '仅 role=server：对端屏幕相对本机的方位（默认沿用上次设置，首次为 right）' },
       },
       required: ['role'],
     },
@@ -1182,6 +1254,20 @@ export function apply(ctx, config) {
         firewall: fw,
       };
     },
+  });
+
+  ctx.tools.register({
+    name: 'deskflow_set_layout',
+    description: '设置键鼠共享的服务端连接方向（对端屏幕相对本机屏幕的方位）。方向由服务端决定：本机正以服务端运行时会立即重启核心使新方向生效；本机是客户端时拒绝设置（需在服务端电脑上设置）；空闲时记住设置，下次服务端连接生效。',
+    parameters: {
+      type: 'object',
+      properties: {
+        layout: { type: 'string', enum: ['right', 'left', 'top', 'bottom'], description: 'right=对端在本机右侧；left=左侧；top=上方；bottom=下方' },
+      },
+      required: ['layout'],
+    },
+    output: { schema: { type: 'object' }, render: renderJson },
+    async execute(args) { return await setLayout(args?.layout, pluginConfig); },
   });
 
   ctx.tools.register({

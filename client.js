@@ -66,6 +66,8 @@
       toggleOn: { background: T.accent, borderColor: T.accent },
       toggleKnob: { position: 'absolute', top: 1, left: 1, width: 15, height: 15, borderRadius: '50%', background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.2)', transition: 'left 0.15s ease' },
       toggleKnobOn: { left: 16 },
+      dirBtn: { padding: '4px 9px', borderRadius: 6, border: `1px solid ${T.borderL2}`, background: T.bgLayer2, backgroundColor: opaque(T.bgLayer2), color: T.text2, fontSize: 11, cursor: 'pointer', lineHeight: 1.4 },
+      dirBtnOn: { background: T.accentSoft, color: T.accent, borderColor: T.accent, fontWeight: 600 },
     };
 
     // ─── Host RPC ───────────────────────────────────────────────────────────
@@ -91,6 +93,14 @@
     const CORE_MODE_NAMES = { 0: '未连接', 1: '客户端', 2: '服务端' };
     // 光写"服务端/客户端"容易被理解成对方的角色，补一句本机实际在做什么
     const CORE_MODE_HINTS = { 1: '（改用对方键鼠）', 2: '（本机键鼠共享给对方）' };
+
+    // 服务端连接方向：对端屏幕相对本机的方位（存到 host 的 ~/.dsh/deskflow-settings.json）
+    const DIRS = [
+      { v: 'right', label: '右' },
+      { v: 'left', label: '左' },
+      { v: 'top', label: '上' },
+      { v: 'bottom', label: '下' },
+    ];
 
     // ─── 角色协商弹窗 ───────────────────────────────────────────────────────
     function NegotiationModal({ peer, busy, onPick, onClose }) {
@@ -128,11 +138,31 @@
       const [manualIp, setManualIp] = React.useState('');
       const seenRef = React.useRef(null);
       const firstPollRef = React.useRef(true);
+      // 点击面板/弹窗以外区域自动收起：引用面板和开关按钮，二者之外的 mousedown 视为外部点击
+      const panelRef = React.useRef(null);
+      const btnRef = React.useRef(null);
+      React.useEffect(() => {
+        if (!panelOpen) return;
+        const onDocMouseDown = (e) => {
+          const t = e.target;
+          if (panelRef.current && !panelRef.current.contains(t)
+            && btnRef.current && !btnRef.current.contains(t)) {
+            setPanelOpen(false);
+          }
+        };
+        document.addEventListener('mousedown', onDocMouseDown);
+        return () => document.removeEventListener('mousedown', onDocMouseDown);
+      }, [panelOpen]);
       // 自动发现开关：本地乐观状态（点击立即翻转），refresh 拿到 host 真实态后归位
       const [discOverride, setDiscOverride] = React.useState(null);
       const discoveryOn = discOverride !== null
         ? discOverride
         : (status ? status.discoveryEnabled !== false : true);
+      // 方向选择：未手动选过时跟随 host 上报（host 无配置则默认 right）
+      const [dirOverride, setDirOverride] = React.useState(null);
+      const curDir = dirOverride || status?.layout || 'right';
+      // 方向由服务端决定：本机作为客户端接入时禁用设置（要改方向请到服务端那台电脑上操作）
+      const isClient = status?.coreMode === 1;
 
       const refresh = React.useCallback(async () => {
         const res = await hostCall('peers');
@@ -140,7 +170,6 @@
         const st = await hostCall('status');
         if (st?.ok && st?.result) { setStatus(st.result); setDiscOverride(null); }
         setPeers(list);
-
         // 首轮只建立基线，之后发现新设备 → 弹协商窗
         if (firstPollRef.current) {
           seenRef.current = new Set(list.map(p => p.instance));
@@ -171,7 +200,7 @@
       const doConnect = async (role, peer) => {
         setBusy(true);
         setMsg(null);
-        const res = await hostCall('connect', { role, peerInstance: peer?.instance, peerIp: peer?.ip });
+        const res = await hostCall('connect', { role, peerInstance: peer?.instance, peerIp: peer?.ip, layout: role === 'server' ? curDir : undefined });
         setBusy(false);
         const r = res?.result;
         if (res?.ok && r?.ok) {
@@ -195,6 +224,24 @@
         setBusy(false);
         if (res?.ok) { setMsg({ type: 'ok', text: (res.result && res.result.message) || '已断开' }); refresh(); }
         else setMsg({ type: 'err', text: res?.error?.message || '断开失败' });
+      };
+
+      // 改方向即调 host：服务端运行中会立即重启核心生效；本机是客户端时 host 会拒绝（方向由服务端决定）
+      const doSetDir = async (dir) => {
+        if (busy || isClient || dir === curDir) return;
+        setBusy(true);
+        setMsg(null);
+        const res = await hostCall('setLayout', { layout: dir });
+        setBusy(false);
+        const r = res?.result;
+        if (res?.ok && r?.ok) {
+          setDirOverride(dir);
+          const note = r.restarted?.message || `方向已设置为 ${dir}`;
+          setMsg(r.restarted?.ok === false ? { type: 'err', text: note } : { type: 'ok', text: note });
+          refresh();
+        } else {
+          setMsg({ type: 'err', text: r?.restarted?.message || r?.message || res?.error?.message || '设置失败' });
+        }
       };
 
       const doToggleDiscovery = async () => {
@@ -229,7 +276,7 @@
         const ip = found ? found.ip : manualIp.trim();
         if (!ip) { setMsg({ type: 'err', text: '启动服务端需要指定对端：等待发现设备出现，或在下方填写对端 IP' }); return; }
         setBusy(true); setMsg(null);
-        const res = await hostCall('connect', { role: 'server', peerIp: ip });
+        const res = await hostCall('connect', { role: 'server', peerIp: ip, layout: curDir });
         setBusy(false);
         const r = res?.result;
         if (res?.ok && r?.ok) {
@@ -244,7 +291,7 @@
         if (!ip) { setMsg({ type: 'err', text: '请先输入对端 IP' }); return; }
         setBusy(true);
         setMsg(null);
-        const res = await hostCall('connect', { role, ip });
+        const res = await hostCall('connect', { role, ip, layout: role === 'server' ? curDir : undefined });
         setBusy(false);
         const r = res?.result;
         if (res?.ok && r?.ok) {
@@ -259,6 +306,7 @@
       const connected = status && (status.coreMode === 1 || status.coreMode === 2);
 
       const btn = h('button', {
+        ref: btnRef,
         title: '键鼠共享（DeskFlow）',
         style: { ...(isRail ? s.railBtn : s.wideBtn), ...(panelOpen ? s.railBtnActive : {}) },
         onClick: () => setPanelOpen(v => !v),
@@ -269,7 +317,7 @@
           : null,
       );
 
-      const panel = panelOpen ? h('div', { style: s.panel },
+      const panel = panelOpen ? h('div', { ref: panelRef, style: s.panel },
         // 头部
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 } },
           h('div', { style: { fontSize: 16, fontWeight: 600, flex: 1 } }, '键鼠共享'),
@@ -302,6 +350,27 @@
               ? h('button', { onClick: doStartServer, title: '本机作为 Deskflow 服务端，把本机键鼠共享给已发现的设备（未发现设备时用手动 IP）', style: s.btnPrimary }, '共享本机键鼠')
               : null,
         ) : null,
+
+        // 服务端连接方向：只影响"本机作为服务端"时的 links 布局；方向由服务端决定，
+        // 本机为客户端时禁用（提示去服务端那台电脑设置）；服务端运行中点选即重启核心生效
+        h('div', { style: { ...s.peerCard, display: 'flex', alignItems: 'center', gap: 8, ...(isClient ? { opacity: 0.6 } : {}) } },
+          h('div', { style: { flex: 1 } },
+            h('div', { style: { fontSize: 12, fontWeight: 600 } }, '切换方向'),
+            h('div', { style: { fontSize: 11, color: T.text3, marginTop: 2 } },
+              isClient
+                ? '本机为客户端，方向由服务端设置'
+                : '本机作为服务端时，对端屏幕相对本机的方位（服务端运行中则立即生效）')),
+          h('div', { style: { display: 'flex', gap: 4 } },
+            DIRS.map(d => h('button', {
+              key: d.v,
+              onClick: () => doSetDir(d.v),
+              disabled: busy || isClient,
+              title: isClient
+                ? '本机是客户端：方向由服务端决定，请在服务端电脑上设置'
+                : (d.v === curDir ? `当前方向：${d.v}（把鼠标推向本机${d.label}侧边缘即可到对端）` : `切换为 ${d.v}`),
+              style: { ...s.dirBtn, ...(curDir === d.v ? s.dirBtnOn : {}), ...(isClient ? { cursor: 'not-allowed' } : {}) },
+            }, d.label))),
+        ),
 
         // 自动发现开关
         h('div', { style: { ...s.peerCard, display: 'flex', alignItems: 'center', gap: 8 } },

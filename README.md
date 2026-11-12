@@ -80,7 +80,7 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 |---|---|---|
 | `backendDir` | 插件自带 `backend/` | 后端目录（含 `deskflow-core.exe` / `deskflow.exe`），默认用仓库内 `backend/`，可指向其他位置 |
 | `launchMode` | `headless` | `headless`=后台核心无窗口；`gui`=拉起 Deskflow 窗口 |
-| `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom） |
+| `layout` | `right` | 服务端模式下对端屏幕相对本机的方向（right/left/top/bottom）。可在面板「切换方向」选择或用 `deskflow_set_layout` / `deskflow_connect` 的 `layout` 参数设置；本机正以服务端运行时立即重启核心生效，否则下次服务端连接生效。选择持久化到 `~/.dsh/deskflow-settings.json`，优先级高于此处配置 |
 | `port` | `24800` | 本机 Deskflow core 端口（随发现广播一起声明） |
 | `staticPeers` | `[]` | 固定对端 IP 列表（如 `["192.168.100.101"]`）：广播被 VPN/网络策略吞掉时以单播兜底互相发现 |
 | `keepRunningOnExit` | `true` | `true`=关闭 DSH 后核心继续跑（键鼠共享不中断，下次连接直接接管）；`false`=关界面即停核心 |
