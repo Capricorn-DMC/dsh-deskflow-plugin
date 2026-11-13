@@ -101,6 +101,22 @@ let pruneTimer = null;
 let restartTimer = null;
 let deskflowChild = null;
 let corePort = DEFAULT_CORE_PORT;
+
+// ─── 常驻巡检状态（实例唯一性 + 弹回波形）─────────────────────────────────────
+// 这两类问题都不会自我暴露：多出来的核心不在 state 里；"进入即被弹回"只是日志里
+// 成对的两行。等用户报障再回头查，成本远高于每 30 秒扫一次。
+const WATCH_INTERVAL_MS = 30000;
+const BOUNCE_FAST_MS = 500;      // 进→出 短于此时长几乎不可能是人力操作
+const BOUNCE_WINDOW_MS = 10 * 60 * 1000;  // 只看最近 10 分钟，避免历史累积成噪声
+const BOUNCE_ALARM_COUNT = 3;    // 窗口内达到这个次数即判定"疑似同名会话互踢"
+let watchTimer = null;
+const healthState = {
+  checkedAt: null,
+  extraCorePids: [],      // 存在但未登记进 state 的核心（互踢来源）
+  duplicateSince: null,
+  bounceCount: 0,         // 最近 10 分钟内的快速弹回次数
+  recentBounces: [],      // 明细（进→出间隔毫秒），最多保留 5 条
+};
 let discoveryEnabled = true; // 自动发现开关（RPC discovery 控制广播与记录）
 let discoveryError = null;   // 发现 socket 绑定失败原因（如端口被旧 DSH 实例占用）
 
@@ -583,12 +599,33 @@ function killPidSync(pid) {
 
 // 接管判定：角色/对端/布局/模式全一致才沿用。任何一项不同都不能接管——
 // 否则会出现"点了连接，实际连的还是上次那台/那个方向"的静默错误。
+//
+// 另加两条硬前置（都是实测踩过的坑）：
+// 1) 实例唯一性：接管只认 state 里那一个 PID，但同机可能还有第二个核心（GUI 拉起、
+//    上次 kill 半途失败、state 被覆盖而进程未退）。此时接管其中一个 = 放任两个同名
+//    客户端并存，对端会在两条同名会话间互踢，表现为"指针刚进对端就被弹回"。
+// 2) 令牌一致性：核心跑在"拉起它的那次宿主"的令牌里，接管不会换令牌。
+//    所以非管理员宿主拉起、之后用管理员宿主接管，提权对核心完全无效
+//    （日志写不进、前台提权窗口注入被 UIPI 拦），必须重启而不是沿用。
 function canAdoptCore(state, want) {
   if (!state || !stateCoreAlive(state)) return { ok: false, reason: '没有在跑的核心' };
   if (want.mode && state.mode && state.mode !== want.mode) return { ok: false, reason: `已有核心运行模式为 ${state.mode}` };
   if (state.role !== want.role) return { ok: false, reason: `已有核心是 ${state.role} 角色` };
   if ((state.layout || '') !== (want.layout || '')) return { ok: false, reason: `已有核心布局为 ${state.layout || '-'}` };
   if (String(state.peer || '') !== String(want.peer || '')) return { ok: false, reason: `已有核心对端为 ${state.peer || '-'}` };
+  const allPids = listImagePids('deskflow-core.exe');
+  if (Array.isArray(allPids) && allPids.length > 1) {
+    return { ok: false, reason: `本机有 ${allPids.length} 个核心实例（PID ${allPids.join(', ')}），接管其一会让两个同名客户端并存互踢` };
+  }
+  if (typeof state.hostElevated === 'boolean') {
+    const nowElevated = isElevated();
+    if (nowElevated !== null && nowElevated !== state.hostElevated) {
+      return {
+        ok: false,
+        reason: `已有核心由${state.hostElevated ? '管理员' : '普通'}权限的宿主拉起，与当前宿主（${nowElevated ? '管理员' : '普通'}）不一致，接管不会让权限变化`,
+      };
+    }
+  }
   return { ok: true };
 }
 
@@ -696,6 +733,88 @@ function cleanupInstances(image) {
   };
 }
 
+// 读文件末尾 N 字节：核心日志能涨到几十万行，全量读会拖慢巡检
+function readLogTail(file, maxBytes = 64 * 1024) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const start = Math.max(0, size - maxBytes);
+      const len = size - start;
+      if (len <= 0) return '';
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, start);
+      return buf.toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } catch { return ''; }
+}
+
+// 从日志尾部数出"指针进入后极短时间被拉回"的次数。
+// 判定口径：entering 与紧随其后的 leaving 间隔 < 500ms。正常人身切屏不可能在这个
+// 尺度内完成反向动作；成对出现则该客户端正被服务端在两个同名会话间来回切换。
+// 幂等：只看最近 10 分钟，不依赖上次扫描位置，重复调用不会累加。
+function scanRecentBounces(text) {
+  // 核心对同一事件会写两行：一行带 [DIAG] 前缀，一行是普通形式。
+  // 必须只取普通行，否则每个事件被数两次、配对也会错位（实测日志确有此现象）。
+  const re = /^(?!\[DIAG\])[^\n]*?(\d{2}):(\d{2}):(\d{2})\.(\d{3})[^\n]*?(entering computer|leaving computer)/gm;
+  const events = [];
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const ms = ((Number(m[1]) * 3600) + (Number(m[2]) * 60) + Number(m[3])) * 1000 + Number(m[4]);
+    const key = `${ms}|${m[5]}`;
+    if (seen.has(key)) continue;   // 双保险：同毫秒同类型的重复行只认一次
+    seen.add(key);
+    events.push({ ms, type: m[5] });
+  }
+  if (!events.length) return [];
+  const lastMs = events[events.length - 1].ms;
+  const bounces = [];
+  let enterAt = null;
+  for (const e of events) {
+    if (e.type === 'entering computer') { enterAt = e.ms; continue; }
+    if (enterAt !== null) {
+      const delta = e.ms - enterAt;   // 跨零点会是负数，直接丢弃
+      if (delta >= 0 && delta < BOUNCE_FAST_MS) bounces.push({ atMs: enterAt, delta });
+      enterAt = null;
+    }
+  }
+  const cutoff = lastMs - BOUNCE_WINDOW_MS;
+  return bounces.filter((x) => x.atMs >= cutoff);
+}
+
+// 一轮巡检：实例唯一性 + 弹回波形。两个检查互不依赖，任一失败不影响另一个。
+function runWatchdog() {
+  const pids = listImagePids('deskflow-core.exe');
+  const state = readCoreState();
+  const extra = Array.isArray(pids) ? pids.filter((p) => !state || p !== state.pid) : [];
+  const changed = extra.length !== healthState.extraCorePids.length
+    || extra.some((p) => !healthState.extraCorePids.includes(p));
+  if (changed) {
+    healthState.extraCorePids = extra;
+    healthState.duplicateSince = extra.length ? new Date().toISOString() : null;
+    if (extra.length) {
+      console.warn(`[deskflow] 巡检：发现 ${extra.length} 个未登记的核心实例（PID ${extra.join(', ')}），它们不在 state 记录里，会与当前核心形成同名客户端互踢`);
+    }
+  }
+  const bounces = scanRecentBounces(readLogTail(path.join(os.homedir(), '.dsh', 'deskflow-core.log')));
+  healthState.bounceCount = bounces.length;
+  healthState.recentBounces = bounces.slice(-5).map((b) => b.delta);
+  healthState.checkedAt = new Date().toISOString();
+}
+
+function startWatchdog() {
+  if (watchTimer) return;
+  try { runWatchdog(); } catch { /* 首轮失败不影响插件加载 */ }
+  watchTimer = setInterval(() => { try { runWatchdog(); } catch { /* 单轮失败不终止巡检 */ } }, WATCH_INTERVAL_MS);
+  // unref：巡检不该拖住宿主进程退出
+  if (typeof watchTimer.unref === 'function') watchTimer.unref();
+}
+
+function stopWatchdog() {
+  if (watchTimer) { clearInterval(watchTimer); watchTimer = null; }
+}
+
 function instanceWarnings(check) {
   if (!check || !check.remaining) return [];
   const hint = isElevated() === false ? '（当前未以管理员运行，无法结束提权进程——这正是多实例的常见来源）' : '';
@@ -729,20 +848,32 @@ async function launchProcess(config, exe, args, label, { killImage = null, role 
   }
   try {
     // detached：后台核心独立于 DSH 生命周期，DSH 重启不影响键鼠共享；
-    // stdout/stderr 落盘到 ~/.dsh/deskflow-core.log（每次启动截断），供排障与面板展示
+    // stdout/stderr 落盘到 ~/.dsh/deskflow-core.log，供排障与面板展示。
+    // 用 append 而非 'w'：截断式日志会在每次重连时抹掉上一次会话，跨会话的问题
+    // （如"每 5 分钟断一次"）永远拿不到前后对照；改为追加 + 超限轮转为 .1。
     const logPath = path.join(os.homedir(), '.dsh', 'deskflow-core.log');
+    const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
     let logFd = -1;
     try {
-      logFd = fs.openSync(logPath, 'w');
+      fs.mkdirSync(path.dirname(logPath), { recursive: true });
+      try {
+        if (fs.statSync(logPath).size > LOG_ROTATE_BYTES) {
+          try { fs.renameSync(logPath, `${logPath}.1`); } catch { /* 被占用则继续追加 */ }
+        }
+      } catch { /* 文件不存在，首次写入 */ }
+      logFd = fs.openSync(logPath, 'a');
     } catch { /* 打不开就退化为 ignore */ }
     const stdio = logFd >= 0 ? ['ignore', logFd, logFd] : 'ignore';
     deskflowChild = spawn(exe, args, { detached: true, stdio });
     const childPid = deskflowChild.pid;
     managedPid = childPid;
-    // 落盘签名：热重载后模块变量会丢，下次连接要靠它判断"能不能接管"
+    // 落盘签名：热重载后模块变量会丢，下次连接要靠它判断"能不能接管"。
+    // hostElevated 记录"拉起这一刻宿主的权限"——令牌不随接管而变，
+    // 靠它挡住"非管理员拉起的核心被管理员宿主接管"这一提权失效路径。
     writeCoreState({
       pid: childPid, role, peer,
       layout: layoutDir(config), mode, exe,
+      hostElevated: isElevated(),
       startedAt: new Date().toISOString(),
     });
     deskflowChild.on('exit', () => {
@@ -1005,9 +1136,14 @@ export function apply(ctx, config) {
   const staleCore = readCoreState();
   if (staleCore && !pidAlive(staleCore.pid)) clearCoreState();
   installExitHook(() => pluginConfig);
+  // 常驻巡检：多实例与快速弹回都不会主动报错，只能定时扫
+  try { startWatchdog(); } catch { /* 巡检启动失败不阻断插件 */ }
   try {
     if (typeof ctx?.on === 'function') {
-      ctx.on('dispose', () => { try { stopCoreOnExit(pluginConfig, 'dispose'); } catch { /* ignore */ } });
+      ctx.on('dispose', () => {
+        try { stopWatchdog(); } catch { /* ignore */ }
+        try { stopCoreOnExit(pluginConfig, 'dispose'); } catch { /* ignore */ }
+      });
     }
   } catch { /* 老版本 host 无 dispose 事件则只靠进程退出钩子 */ }
 
@@ -1067,6 +1203,15 @@ export function apply(ctx, config) {
                   layout: layoutDir(pluginConfig),
                   confPath: confPath(),
                   port: corePort,
+                  // 巡检结果：多出来的核心、最近 10 分钟的快速弹回
+                  health: {
+                    checkedAt: healthState.checkedAt,
+                    extraCorePids: healthState.extraCorePids,
+                    duplicateSince: healthState.duplicateSince,
+                    bounceCount: healthState.bounceCount,
+                    recentBounceDeltas: healthState.recentBounces,
+                    suspectKick: healthState.bounceCount >= BOUNCE_ALARM_COUNT,
+                  },
                 },
               });
             }
@@ -1118,6 +1263,36 @@ export function apply(ctx, config) {
               const fw = firewallState();
               if (fw && !fw.allOk) issues.push('防火墙未放行 24800，对端可能连不上');
               const rt = coreRuntime();
+              // 令牌陈旧：核心是被旧宿主拉起的，当前宿主的权限与它不一致。
+              // 这时"以管理员运行"对核心无效，必须让它重启一次才生效
+              if (rt.state && typeof rt.state.hostElevated === 'boolean' && isElevated() !== null && rt.state.hostElevated !== isElevated()) {
+                issues.push(`在跑的核心由${rt.state.hostElevated ? '管理员' : '普通'}权限的旧宿主拉起（当前宿主为${isElevated() ? '管理员' : '普通'}），接管不会改变它的令牌；点一次「断开→连接」让它重启才生效`);
+              }
+              // 反复被接管说明核心长期没重启过，配置与令牌都是旧的
+              if (rt.state && Number(rt.state.adoptedCount) >= 3) {
+                notes.push(`该核心已被接管 ${rt.state.adoptedCount} 次且从未重启（启动于 ${rt.state.startedAt || '未知'}）；若出现"提权无效/日志不更新/配置不生效"，先断开再连接`);
+              }
+              // 旧版签名没记 hostElevated：无从判断这个核心继承的是谁家的令牌
+              if (rt.state && typeof rt.state.hostElevated !== 'boolean') {
+                notes.push('该核心的签名来自旧版本插件，无法判断它运行在哪个权限令牌下；若刚切换过「以管理员运行」，断开后重连一次才能确保提权落到核心上');
+              }
+              // 巡检结论：未登记的核心 + 快速弹回，两者同时出现基本可判定为互踢
+              if (healthState.extraCorePids.length) {
+                issues.push(`巡检发现 ${healthState.extraCorePids.length} 个未登记的核心实例（PID ${healthState.extraCorePids.join(', ')}），与当前核心并存会造成同名客户端互踢`);
+              }
+              if (healthState.bounceCount >= BOUNCE_ALARM_COUNT) {
+                issues.push(`最近 10 分钟有 ${healthState.bounceCount} 次「进入对端后 ${BOUNCE_FAST_MS}ms 内被拉回」（间隔 ${healthState.recentBounces.join('/')} ms），符合同名会话互踢特征；请在对端重启一次 Deskflow 服务端以清空会话表`);
+              }
+              const coreLog = path.join(os.homedir(), '.dsh', 'deskflow-core.log');
+              let coreLogInfo = null;
+              try {
+                const st = fs.statSync(coreLog);
+                coreLogInfo = { path: coreLog, bytes: st.size, mtime: st.mtime.toISOString() };
+                // 连接中但日志十分钟没动：核心可能已经不再往 stdout 写（或已半死）
+                if (rt.running && Date.now() - st.mtimeMs > 10 * 60 * 1000) {
+                  notes.push(`核心日志已 ${Math.round((Date.now() - st.mtimeMs) / 60000)} 分钟没有新增（${coreLog}），连接可能已半死`);
+                }
+              } catch { coreLogInfo = { path: coreLog, missing: true }; }
               return reply({
                 ok: true,
                 value: {
@@ -1132,6 +1307,14 @@ export function apply(ctx, config) {
                   coreRunning: rt.running,
                   adoptedCore: rt.adopted,
                   coreState: rt.state,
+                  coreLog: coreLogInfo,
+                  health: {
+                    checkedAt: healthState.checkedAt,
+                    extraCorePids: healthState.extraCorePids,
+                    bounceCount: healthState.bounceCount,
+                    recentBounceDeltas: healthState.recentBounces,
+                    suspectKick: healthState.bounceCount >= BOUNCE_ALARM_COUNT,
+                  },
                   keepRunningOnExit: pluginConfig.keepRunningOnExit !== false,
                   port: corePort,
                   firewall: fw,
@@ -1239,6 +1422,23 @@ export function apply(ctx, config) {
       const fw = firewallState();
       if (fw && !fw.allOk) issues.push('防火墙未放行 24800，对端可能连不上');
       const rt = coreRuntime();
+      // 与 RPC diagnose 保持同一套判据：令牌陈旧的核心接管道具"提权无效"
+      if (rt.state && typeof rt.state.hostElevated === 'boolean' && isElevated() !== null && rt.state.hostElevated !== isElevated()) {
+        issues.push(`在跑的核心由${rt.state.hostElevated ? '管理员' : '普通'}权限的旧宿主拉起（当前宿主为${isElevated() ? '管理员' : '普通'}），接管不会改变它的令牌；断开后重连一次让它重启才生效`);
+      }
+      if (rt.state && Number(rt.state.adoptedCount) >= 3) {
+        notes.push(`该核心已被接管 ${rt.state.adoptedCount} 次且从未重启（启动于 ${rt.state.startedAt || '未知'}）`);
+      }
+      if (rt.state && typeof rt.state.hostElevated !== 'boolean') {
+        notes.push('该核心的签名来自旧版本插件，无法判断它运行在哪个权限令牌下；若刚切换过「以管理员运行」，断开后重连一次才能确保提权落到核心上');
+      }
+      // 与 RPC diagnose 同一套判据，两个入口不能给出不同结论
+      if (healthState.extraCorePids.length) {
+        issues.push(`巡检发现 ${healthState.extraCorePids.length} 个未登记的核心实例（PID ${healthState.extraCorePids.join(', ')}），与当前核心并存会造成同名客户端互踢`);
+      }
+      if (healthState.bounceCount >= BOUNCE_ALARM_COUNT) {
+        issues.push(`最近 10 分钟有 ${healthState.bounceCount} 次「进入对端后 ${BOUNCE_FAST_MS}ms 内被拉回」（间隔 ${healthState.recentBounces.join('/')} ms），符合同名会话互踢特征；请在对端重启一次 Deskflow 服务端以清空会话表`);
+      }
       return {
         healthy: issues.length === 0,
         issues,
@@ -1251,6 +1451,13 @@ export function apply(ctx, config) {
         adoptedCore: rt.adopted,
         coreState: rt.state,
         coreMode: readCoreMode(),
+        health: {
+          checkedAt: healthState.checkedAt,
+          extraCorePids: healthState.extraCorePids,
+          bounceCount: healthState.bounceCount,
+          recentBounceDeltas: healthState.recentBounces,
+          suspectKick: healthState.bounceCount >= BOUNCE_ALARM_COUNT,
+        },
         firewall: fw,
       };
     },

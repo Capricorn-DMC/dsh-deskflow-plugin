@@ -41,7 +41,12 @@
       railBtn: { width: 36, height: 36, borderRadius: 8, border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 18, display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.text2, padding: 0 },
       railBtnActive: { background: T.accentSoft, color: T.accent },
       wideBtn: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '7px 10px', borderRadius: 8, border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 13, fontFamily: FONT, color: T.text2 },
-      panel: { position: 'fixed', left: 64, bottom: 12, width: 340, maxHeight: 520, overflowY: 'auto', background: T.bgLayer1, backgroundColor: opaque(T.bgLayer1), border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.25)', padding: 16, fontFamily: FONT, fontSize: 13, color: T.text, zIndex: 9999 },
+      // 高度按内容自适应：不写死 maxHeight，否则内容会被截断出现滚动条。
+      // 各区块实测合计约 600px（头部 38 + 三张状态卡 60×3 + 两个小标题 39×2 + 设备卡 96 +
+      // 手动连接卡 95 + 说明 58 + 版本 22 + 内边距 32），写死 520 会多出 80px 横向溢不下的高度。
+      // 上限用视口高减上下留白：正常窗口下永不出现滚动条，只有设备多到超出屏幕时才滚——
+      // 那种情况任何方案都必须滚或截断，留 auto 做兜底而不是让它常态可见。
+      panel: { position: 'fixed', left: 64, bottom: 12, width: 340, maxHeight: 'calc(100vh - 24px)', overflowY: 'auto', overflowX: 'hidden', background: T.bgLayer1, backgroundColor: opaque(T.bgLayer1), border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.25)', padding: 16, fontFamily: FONT, fontSize: 13, color: T.text, zIndex: 9999 },
       overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FONT },
       modal: { width: 400, background: T.bgLayer1, backgroundColor: opaque(T.bgLayer1), border: `1px solid ${T.borderL1}`, borderRadius: 14, boxShadow: '0 12px 48px rgba(0,0,0,0.35)', padding: 22, color: T.text },
       sectionTitle: { fontSize: 13, fontWeight: 600, margin: '0 0 8px 0', color: T.text, display: 'flex', alignItems: 'center', gap: 6 },

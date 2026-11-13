@@ -95,15 +95,21 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 
 所以做法是**接管**：
 
-- 拉起核心时把签名（pid / 角色 / 对端 / 布局 / 模式）写进 `~/.dsh/deskflow-core.state.json`
+- 拉起核心时把签名（pid / 角色 / 对端 / 布局 / 模式 / 拉起时的宿主权限）写进 `~/.dsh/deskflow-core.state.json`
 - 下次连接先读这份记录：pid 还活着、且确实是 `deskflow-core.exe`（防 pid 复用）、角色/对端/布局/模式全都一致 → **直接沿用**，不再起第二个进程，也不打断现有连接
 - 签名不一致才清理重启，保证不会"点了连接、实际连的还是上次那台"
+
+接管还有两条硬前置，不满足就宁可重启：
+
+- **实例唯一性**：同机存在第二个 `deskflow-core.exe`（GUI 拉起、上次 `taskkill` 半途失败、state 被覆盖但进程未退）时拒绝接管。接管只认 state 里那一个 PID，放任另一个继续跑就是两个同名客户端互踢 —— 表现为"指针刚进对端就被拉回"。
+- **令牌一致性**：核心运行在"拉起它的那次宿主"的令牌里，接管不会换令牌。非管理员宿主拉起、之后用管理员宿主接管，提权对核心完全无效（日志写不进、前台提权窗口注入被 UIPI 拦）。签名里的 `hostElevated` 与当前宿主不一致时拒绝接管，走重启拿新令牌。
 
 配套规则：
 
 - **默认不杀核心**（`keepRunningOnExit: true`）；想"关界面即停"的设 `false`，此时插件在 `process.exit`、`SIGINT/SIGTERM/SIGHUP/SIGBREAK`、cordis `dispose` 里结束核心
 - **旧实例清不掉就拒绝启动**：`taskkill` 结束提权进程会静默失败（典型场景：旧 core 以管理员启动、当前 DSH 没有），这时宁可报错让你处理，也不会再起一个去互踢。提示里会带上残留 PID
 - **DSH 被任务管理器强杀**：`exit` 钩子不触发，但不影响下次连接——签名一致就接管，不一致就清理，都不需要手工收拾
+- **常驻巡检**（30s 一轮，结果在 `status.health` 与 `diagnose` 里）：扫出未登记的核心实例；同时解析核心日志，统计"进入对端后 <500ms 被拉回"的次数（只算最近 10 分钟，≥3 次判定为疑似同名会话互踢）。单个 179ms 级的进-出在正常使用中也会出现（快速划过屏幕边缘），所以阈值按"连续多次"而非"单次"设定
 
 ## 工作原理
 
@@ -127,6 +133,8 @@ New-NetFirewallRule -DisplayName "DSH Deskflow Core" -Direction Inbound -Protoco
 
 ## 排障要点
 
+- **"指针切不过去 / 刚进对端就被弹回"先看巡检结论**，而不要先怀疑连接本身：`deskflow_doctor` 或面板的 `health` 里，`bounceCount ≥ 3` 说明本机正被服务端在两个同名会话间来回切换（对端重启一次 Deskflow 服务端即可清空会话表）；`extraCorePids` 非空说明本机有未登记的核心在跑；两者都为空再查方向、显示缩放、对端是否锁屏
+- **判断"提权是否真的生效"看 PID 与启动时间**，不要看面板文案：核心以 `detached` 方式启动，宿主重启后按签名接管，PID 与 `startedAt` 不变就说明这次"以管理员运行"没有落到核心上，需要断开→重连一次
 - **两端插件版本一致，且两端都重启过 DSH**：UI 与 host 不一致时，问题通常以 `Unknown method` 或参数缺失的形式暴露出来。面板底部显示 `UI vX / Host vY`，两者不一致先彻底重启 DSH
 - **版本号三处一致**：`package.json` 的 `version`、`index.js` 的 `PLUGIN_VERSION`、`client.js` 的 `UI_VERSION`
 - DSH 版本要求：`0.2.1+`（依赖 `~/.dsh/profiles/*/node_modules/@local/*` 外部插件加载与 `connection.fetch` 的 RPC 注册）
