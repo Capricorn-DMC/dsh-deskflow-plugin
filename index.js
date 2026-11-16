@@ -949,6 +949,11 @@ async function launchGui(config, role) {
 async function connect(args, config) {
   const role = args?.role === 'client' ? 'client' : args?.role === 'server' ? 'server' : null;
   if (!role) return { ok: false, message: 'role 必须是 server 或 client' };
+  // restart=true：跳过接管，强制重建核心。Deskflow 的 Windows 客户端把光标可见性
+  // 记在进程内（hide/show 计数按线程维护），一旦失配，坐标和日志都正常但屏幕上没有指针，
+  // 只有换进程才能恢复。接管只校验配置签名，永远发现不了这种"配置对、进程病"的状态，
+  // 所以必须留一个绕过接管的入口，而不是让用户去任务管理器手工杀进程。
+  const forceRestart = args?.restart === true;
 
   let ip = typeof args?.peerIp === 'string' && args.peerIp ? args.peerIp : null;
   if (!ip && typeof args?.ip === 'string' && args.ip.trim()) ip = args.ip.trim(); // 纯 IP 手动直连
@@ -1002,7 +1007,7 @@ async function connect(args, config) {
       layout: layoutDir(effConfig),
       mode: launchMode(config),
     };
-    if (want.mode === 'headless') {
+    if (want.mode === 'headless' && !forceRestart) {
       const state = readCoreState();
       const verdict = canAdoptCore(state, want);
       if (verdict.ok) {
@@ -1396,6 +1401,7 @@ export function apply(ctx, config) {
         peerInstance: { type: 'string', description: '对端 instance id（deskflow_scan_peers 返回）' },
         peerIp: { type: 'string', description: '对端 IP（与 peerInstance 二选一，client 角色必填其一）' },
         layout: { type: 'string', enum: ['right', 'left', 'top', 'bottom'], description: '仅 role=server：对端屏幕相对本机的方位（默认沿用上次设置，首次为 right）' },
+        restart: { type: 'boolean', description: '跳过接管，强制重建 Deskflow 核心进程。出现"已连接、坐标正常，但对端/本机看不到鼠标指针"时使用——光标可见性记在进程内，只有换进程能恢复' },
       },
       required: ['role'],
     },
